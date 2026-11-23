@@ -12,14 +12,14 @@ from traders.cscalp_sdk_trader.bot_on_ticker import init_trader
 class CSTrader:
     """
     Боевой трейдер для работы через локальный C# сервер CScalp SDK.
-    Заменяет старый VT7 (CV + кликер) на прямое API-взаимодействие.
+    Использует декларативную синхронизацию заявок (sync_orders).
     """
 
     def __init__(
         self,
         group_cfg: Dict[str, Dict[str, Tuple[int, int]]],
         base_url: str = "http://localhost:7777",
-        candles_limit: int = 200,
+        candles_limit: int = 201,
         close_on_time: bool = True,
         close_map: tuple = ((21, 30), (21, 30), (21, 30), (21, 30), (21, 30), (17, 30), (17, 30)),
         debug_mode: bool = False,
@@ -29,8 +29,8 @@ class CSTrader:
         self.close_on_time = close_on_time
         self.close_time = close_map[datetime.now().weekday()]
         self.debug_mode = debug_mode
-
-        # Управление принудительными режимами с кнопок GUI:
+        if debug_mode:
+            self._init_debug_folders()
         # None - штатно по времени, -2 - только закрытие, -1 - закрыть всё принудительно
         self.force_mode: Optional[int] = None
 
@@ -50,6 +50,9 @@ class CSTrader:
                     'lot': int(lot),
                     'step': 0.01,
                     'decimals': 2,
+                    'last_pos': 0,
+                    'last_signal': None,  # хранит последний непустой сигнал (pdata, raw_action, action, bp, orders)
+
                 }
 
         self.trader_name = 'CSTrader'
@@ -76,12 +79,22 @@ class CSTrader:
             self.client.subscribe(slot, tickers)
             print(f"[CSTrader] Подписка оформлена: {slot} -> {tickers}")
 
-        time.sleep(1.5)
-
         for (slot, ticker), bot in self.active_bots.items():
-            bp = self.client.get_best_prices(slot, ticker)
-            step = bp.get('step', 0.01)
-            decimals = bp.get('decimals', 2)
+            deadline = time.time() + 15.0
+            while True:
+                try:
+                    bp = self.client.get_best_prices(slot, ticker)
+                    if 'step' in bp and 'decimals' in bp and bp['step'] > 0:
+                        break
+                except Exception:
+                    pass
+
+                if time.time() > deadline:
+                    raise TimeoutError(f"Не удалось получить стакан и шаг цены для {slot}:{ticker} за 15 сек.")
+                time.sleep(0.2)
+
+            step = bp['step']
+            decimals = bp['decimals']
             bot['step'] = step
             bot['decimals'] = decimals
 
@@ -91,8 +104,65 @@ class CSTrader:
             bot['te'] = te_cls(ticker, step, mode, *params)
             print(
                 f"[CSTrader] Инициализирован {slot}:{ticker} -> {te_cls.__name__} "
-                f"(tf={bot['tf']}m, lot={bot['lot']}, step={step})"
+                f"(tf={bot['tf']}m, lot={bot['lot']}, step={step}, decimals={decimals})"
             )
+
+    def _init_debug_folders(self):
+        date_folder = datetime.now().strftime('%d%m%Y')
+        self.debug_folder_main = os.path.join('_logs', 'debug_cs', date_folder)
+        self.debug_folder_log = os.path.join(self.debug_folder_main, 'logs')
+        self.debug_folder_df = os.path.join(self.debug_folder_main, 'dfs')
+        self.debug_folder_fg = os.path.join(self.debug_folder_main, 'fg')
+        os.makedirs(self.debug_folder_log, exist_ok=True)
+        os.makedirs(self.debug_folder_df, exist_ok=True)
+        os.makedirs(self.debug_folder_fg, exist_ok=True)
+
+    def _debug_save(
+        self,
+        slot: str,
+        ticker: str,
+        bot: Dict[str, Any],
+        pdata: Dict[str, Any],
+        pos: int,
+        pos_units: int,
+        delta: Optional[float],
+        raw_action: Any,
+        final_action: Any,
+        bp: Dict[str, Any],
+        orders_info: Dict[str, Any],
+        tag: str = '',
+    ):
+        now = datetime.now()
+        now_ms = str(int(time.time() * 1000))
+        safe_slot = slot.replace(':', '_')
+        suffix = f"_{tag}" if tag else ""
+        base_name = f"{safe_slot}_{ticker}_{now_ms}{suffix}"
+
+        # 1. Сохраняем df с индикаторами, если есть
+        df = pdata.get('chart') if isinstance(pdata, dict) else None
+        if df is not None and not df.empty:
+            df.to_csv(os.path.join(self.debug_folder_df, f"{base_name}.csv"))
+
+        # 2. Сохраняем снимок стакана, если запрашивался
+        fg = pdata.get('fg') if isinstance(pdata, dict) else None
+        if fg is not None:
+            import json
+            with open(os.path.join(self.debug_folder_fg, f"{base_name}.json"), 'w', encoding='utf-8') as f:
+                json.dump(fg, f, ensure_ascii=False, indent=2)
+
+        # 3. Пишем текстовый лог события
+        log_file = os.path.join(self.debug_folder_log, f"{safe_slot}_{ticker}.txt")
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(f"{now} [{tag}]\n")
+            f.write(f"ts_ms: {now_ms}\n")
+            f.write(f"strategy: {type(bot['te']).__name__}\n")
+            f.write(f"pos: {pos} ({pos_units}u) | delta: {delta}\n")
+            f.write(f"bp: {bp}\n")
+            f.write(f"orders: {orders_info}\n")
+            f.write(f"raw_action: {raw_action}\n")
+            f.write(f"final_action: {final_action}\n")
+            f.write("=" * 40 + "\n")
+
 
     # ================= ВРЕМЯ И БЕЗОПАСНОСТЬ =================
 
@@ -116,10 +186,32 @@ class CSTrader:
             return 1
         return 0
 
-    def _apply_close_on_time(self, action: Any, time_mode: int) -> Any:
-        # Принудительные кнопки (-1 и -2) работают даже если close_on_time=False
+    def _get_pos_units_for_ticker(self, slot: str, ticker: str) -> int:
+        sub_bot = self.active_bots.get((slot, ticker))
+        if not sub_bot:
+            return 0
+        pos_info = self.client.get_position(slot, ticker)
+        raw_amount = int(pos_info.get('amount', 0))
+        lot = sub_bot['lot']
+        if raw_amount == 0:
+            return 0
+        units = int(round(raw_amount / lot)) if lot else raw_amount
+        return units if units != 0 else (1 if raw_amount > 0 else -1)
+
+    def _apply_close_on_time(self, action: Any, time_mode: int, pos_units: int = 0, slot: str = '') -> Any:
         if self.force_mode is None and not self.close_on_time:
             return action
+
+        if isinstance(action, dict):
+            return {
+                k: self._apply_close_on_time(
+                    v,
+                    time_mode,
+                    self._get_pos_units_for_ticker(slot, k),
+                    slot,
+                )
+                for k, v in action.items()
+            }
 
         if time_mode == -1:
             return 'close_all'
@@ -133,9 +225,20 @@ class CSTrader:
                     return action.replace('spred', 'close')
                 elif 'open_all' in action:
                     return action.replace('open', 'close')
-            elif isinstance(action, (int, float)) and action != 0:
-                return 0
+            elif isinstance(action, (int, float)):
+                if pos_units == 0:
+                    return 0
+                if pos_units > 0 and action < 0:
+                    return 0
+                if pos_units < 0 and action > 0:
+                    return 0
+                if pos_units > 0 and action > pos_units:
+                    return pos_units
+                if pos_units < 0 and action < pos_units:
+                    return pos_units
         return action
+
+
 
     # ================= СБОР ДАННЫХ ДЛЯ СТРАТЕГИИ =================
 
@@ -152,10 +255,10 @@ class CSTrader:
         tdata: Dict[str, Any] = {}
         needs = te.needs_info
 
-        if needs is None or 'chart' in needs:
-            tdata['chart'] = self.client.get_candles(slot, ticker, tf_minutes=tf, limit=self.candles_limit)
 
         if needs is not None:
+            if 'chart' in needs:
+                tdata['chart'] = self.client.get_candles(slot, ticker, tf_minutes=tf, limit=self.candles_limit)
             if 'charts' in needs:
                 tdata['charts'] = {}
                 for item in needs['charts']:
@@ -213,47 +316,32 @@ class CSTrader:
 
         delta = None
         if avg_price > 0 and step > 0:
-            if raw_amount > 0 and bbid > 0:
-                delta = (bbid - avg_price) / step
-            elif raw_amount < 0 and bask > 0:
-                delta = (avg_price - bask) / step
+            if raw_amount > 0 and bask > 0:
+                delta = (bask - avg_price) / step
+            elif raw_amount < 0 and bbid > 0:
+                delta = (avg_price - bbid) / step
 
         return raw_amount, pos_units, delta
 
-    # ================= ИСПОЛНЕНИЕ КОМАНД И ЗАЯВОК =================
+    # ================= ФОРМИРОВАНИЕ И СИНХРОНИЗАЦИЯ ЗАЯВОК =================
 
-    def _set_target_amount(
-        self,
-        slot: str,
-        ticker: str,
-        current_amount: int,
-        target_amount: int,
-        limit_orders: List[Dict[str, Any]],
-    ):
+    def _target_amount_to_orders(self, current_amount: int, target_amount: int) -> List[Dict[str, Any]]:
+        """Превращает целевой объем позиции в список заявок с автоценой (price=None)."""
         diff = target_amount - current_amount
-        if diff == 0:
-            if limit_orders:
-                self.client.cancel(slot, ticker)
-            return
-
-        if limit_orders:
-            return
-
         if diff > 0:
-            self.client.buy_limit(slot, ticker, amount=abs(diff), price=None)
-        else:
-            self.client.sell_limit(slot, ticker, amount=abs(diff), price=None)
+            return [{'side': 'BUY', 'amount': abs(diff), 'price': None}]
+        elif diff < 0:
+            return [{'side': 'SELL', 'amount': abs(diff), 'price': None}]
+        return []
 
-    def _execute_step_action(
+    def _step_action_to_orders(
         self,
-        slot: str,
-        ticker: str,
         bot: Dict[str, Any],
         action: str,
         current_amount: int,
         bp: Dict[str, Any],
-        limit_orders: List[Dict[str, Any]],
-    ):
+    ) -> List[Dict[str, Any]]:
+        """Формирует список заявок для спредовых/шаговых команд ('spred_all_step_5', 'open_long_step_2')."""
         parts = action.split('_')
         type_action = parts[0]   # 'spred', 'open', 'close'
         dir_action = parts[1]    # 'long', 'short', 'all'
@@ -265,69 +353,48 @@ class CSTrader:
 
         bbid = bp.get('bestBid', 0.0)
         bask = bp.get('bestAsk', 0.0)
-        if bbid <= 0 or bask <= 0:
-            return
+        if bbid <= 0 or bask <= 0 or bask < bbid:
+            return []
 
         buy_price = round(bbid - step_mult * step, decimals) if step_mult > 0 else None
         sell_price = round(bask + step_mult * step, decimals) if step_mult > 0 else None
 
-        desired_orders: List[Tuple[str, float, Optional[float]]] = []
+        orders: List[Dict[str, Any]] = []
 
         if type_action == 'spred':
             if dir_action == 'long':
+                # Набираем лонг до +lot (если еще не набрали) и закрываем в 0 то, что уже налито
+                if current_amount < lot:
+                    orders.append({'side': 'BUY', 'amount': lot - current_amount, 'price': buy_price})
                 if current_amount > 0:
-                    desired_orders.append(('SELL', abs(current_amount), sell_price))
-                else:
-                    need_buy = lot + abs(current_amount) if current_amount < 0 else lot
-                    desired_orders.append(('BUY', need_buy, buy_price))
+                    orders.append({'side': 'SELL', 'amount': current_amount, 'price': sell_price})
+
             elif dir_action == 'short':
+                # Набираем шорт до -lot (если еще не набрали) и закрываем в 0 то, что уже налито
+                if current_amount > -lot:
+                    orders.append({'side': 'SELL', 'amount': lot + current_amount, 'price': sell_price})
                 if current_amount < 0:
-                    desired_orders.append(('BUY', abs(current_amount), buy_price))
-                else:
-                    need_sell = lot + current_amount if current_amount > 0 else lot
-                    desired_orders.append(('SELL', need_sell, sell_price))
-            else:
-                if current_amount > 0:
-                    desired_orders.append(('SELL', abs(current_amount), sell_price))
-                elif current_amount < 0:
-                    desired_orders.append(('BUY', abs(current_amount), buy_price))
-                else:
-                    desired_orders.append(('BUY', lot, buy_price))
-                    desired_orders.append(('SELL', lot, sell_price))
+                    orders.append({'side': 'BUY', 'amount': abs(current_amount), 'price': buy_price})
+
+            else:  # 'all' (качели от -lot до +lot)
+                if current_amount < lot:
+                    orders.append({'side': 'BUY', 'amount': lot - current_amount, 'price': buy_price})
+                if current_amount > -lot:
+                    orders.append({'side': 'SELL', 'amount': lot + current_amount, 'price': sell_price})
 
         elif type_action == 'open':
             if dir_action in ('long', 'all') and current_amount < lot:
-                desired_orders.append(('BUY', lot - current_amount, buy_price))
+                orders.append({'side': 'BUY', 'amount': lot - current_amount, 'price': buy_price})
             if dir_action in ('short', 'all') and current_amount > -lot:
-                desired_orders.append(('SELL', lot + current_amount, sell_price))
+                orders.append({'side': 'SELL', 'amount': lot + current_amount, 'price': sell_price})
 
-        else:
+        else:  # 'close'
             if dir_action in ('long', 'all') and current_amount > 0:
-                desired_orders.append(('SELL', abs(current_amount), sell_price))
+                orders.append({'side': 'SELL', 'amount': abs(current_amount), 'price': sell_price})
             if dir_action in ('short', 'all') and current_amount < 0:
-                desired_orders.append(('BUY', abs(current_amount), buy_price))
+                orders.append({'side': 'BUY', 'amount': abs(current_amount), 'price': buy_price})
 
-        if len(limit_orders) == len(desired_orders):
-            all_match = True
-            for side, qty, price in desired_orders:
-                matched = any(
-                    o.get('side') == side and (price is None or abs(float(o.get('price', 0)) - price) < step * 0.1)
-                    for o in limit_orders
-                )
-                if not matched:
-                    all_match = False
-                    break
-            if all_match:
-                return
-
-        if limit_orders:
-            self.client.cancel(slot, ticker)
-
-        for side, qty, price in desired_orders:
-            if side == 'BUY':
-                self.client.buy_limit(slot, ticker, amount=qty, price=price)
-            else:
-                self.client.sell_limit(slot, ticker, amount=qty, price=price)
+        return orders
 
     def _work_action(
         self,
@@ -337,42 +404,33 @@ class CSTrader:
         action: Any,
         current_amount: int,
         bp: Dict[str, Any],
-        limit_orders: List[Dict[str, Any]],
     ):
         lot = bot['lot']
+        desired_orders: List[Dict[str, Any]] = []
 
         if isinstance(action, (int, float)):
             target_amount = int(round(action * lot))
-            self._set_target_amount(slot, ticker, current_amount, target_amount, limit_orders)
-            return
+            desired_orders = self._target_amount_to_orders(current_amount, target_amount)
 
-        if action is None:
-            if limit_orders and bot['mode'] is None:
-                self.client.cancel(slot, ticker)
-            return
-
-        if isinstance(action, str):
+        elif isinstance(action, str):
             if 'step' in action:
-                self._execute_step_action(slot, ticker, bot, action, current_amount, bp, limit_orders)
+                desired_orders = self._step_action_to_orders(bot, action, current_amount, bp)
             elif action in ('close_long', 'stop_close_long'):
                 if current_amount > 0:
-                    self._set_target_amount(slot, ticker, current_amount, 0, limit_orders)
-                elif limit_orders:
-                    self.client.cancel(slot, ticker)
+                    desired_orders = self._target_amount_to_orders(current_amount, 0)
             elif action in ('close_short', 'stop_close_short'):
                 if current_amount < 0:
-                    self._set_target_amount(slot, ticker, current_amount, 0, limit_orders)
-                elif limit_orders:
-                    self.client.cancel(slot, ticker)
+                    desired_orders = self._target_amount_to_orders(current_amount, 0)
             elif action == 'close_all':
                 if current_amount != 0:
-                    self._set_target_amount(slot, ticker, current_amount, 0, limit_orders)
-                elif limit_orders:
-                    self.client.cancel(slot, ticker)
+                    desired_orders = self._target_amount_to_orders(current_amount, 0)
             elif action == 'open_long':
-                self._set_target_amount(slot, ticker, current_amount, lot, limit_orders)
+                desired_orders = self._target_amount_to_orders(current_amount, lot)
             elif action == 'open_short':
-                self._set_target_amount(slot, ticker, current_amount, -lot, limit_orders)
+                desired_orders = self._target_amount_to_orders(current_amount, -lot)
+
+        # Отправляем целевое состояние на C#-сервер (он сам оставит нужное, снимет лишнее и выставит новое)
+        self.client.sync_orders(slot, ticker, desired_orders)
 
     # ================= ОСНОВНОЙ ТОРГОВЫЙ ЦИКЛ =================
 
@@ -391,11 +449,8 @@ class CSTrader:
         for (slot, ticker), bot in self.active_bots.items():
             try:
                 pos_info = self.client.get_position(slot, ticker)
-                if not pos_info.get('isReplicationsDone', True):
-                    continue
 
                 orders_info = self.client.get_orders(slot, ticker)
-                limit_orders = orders_info.get('limitOrders', [])
                 bp = self.client.get_best_prices(slot, ticker)
 
                 current_amount, pos_units, delta = self._calc_pos_and_delta(bot, pos_info, bp)
@@ -404,29 +459,58 @@ class CSTrader:
                 te: BaseTE = bot['te']
                 pdata = te.preprocessing(tdata)
 
-                action = te(pdata, pos_units, delta)
-                action = self._apply_close_on_time(action, time_mode)
+                raw_action = te(pdata, pos_units, delta)
+                action = self._apply_close_on_time(raw_action, time_mode, pos_units,slot)
 
                 if self.debug_mode:
-                    print(
-                        f"[{datetime.now().strftime('%H:%M:%S')}] {slot}:{ticker} | "
-                        f"pos={current_amount} ({pos_units}u) | delta={delta} | action={action}"
-                    )
+                    # 1. Если позиция изменилась — сбрасываем на диск и текущий момент, и сигнал-причину из памяти
+                    if current_amount != bot['last_pos']:
+                        # Сначала пишем сигнал, который привёл к этой сделке (если он был)
+                        if bot['last_signal'] is not None:
+                            sig = bot['last_signal']
+                            self._debug_save(
+                                slot, ticker, bot, sig['pdata'],
+                                sig['pos'], sig['pos_units'], sig['delta'],
+                                sig['raw_action'], sig['action'], sig['bp'], sig['orders'],
+                                tag='SIGNAL_CAUSE'
+                            )
+                        # И пишем сам факт изменения позиции
+                        self._debug_save(
+                            slot, ticker, bot, pdata,
+                            current_amount, pos_units, delta,
+                            raw_action, action, bp, orders_info,
+                            tag='POS_CHANGED'
+                        )
+                        bot['last_pos'] = current_amount
+
+                    # 2. В оперативной памяти всегда держим последний активный сигнал (0 мс накладных расходов)
+                    if action is not None:
+                        bot['last_signal'] = {
+                            'pdata': pdata,
+                            'pos': current_amount,
+                            'pos_units': pos_units,
+                            'delta': delta,
+                            'raw_action': raw_action,
+                            'action': action,
+                            'bp': bp,
+                            'orders': orders_info,
+                        }
 
                 if isinstance(action, dict):
                     for target_ticker, sub_action in action.items():
                         sub_bot = self.active_bots.get((slot, target_ticker))
-                        if sub_bot:
+                        if not sub_bot:
+                            continue
+                        if target_ticker == ticker:
+                            sub_amount = current_amount
+                            sub_bp = bp
+                        else:
                             sub_pos = self.client.get_position(slot, target_ticker)
-                            sub_ord = self.client.get_orders(slot, target_ticker).get('limitOrders', [])
+                            sub_amount = int(sub_pos.get('amount', 0))
                             sub_bp = self.client.get_best_prices(slot, target_ticker)
-                            self._work_action(
-                                slot, target_ticker, sub_bot, sub_action,
-                                int(sub_pos.get('amount', 0)), sub_bp, sub_ord
-                            )
+                        self._work_action(slot, target_ticker, sub_bot, sub_action, sub_amount, sub_bp)
                 else:
-                    self._work_action(slot, ticker, bot, action, current_amount, bp, limit_orders)
+                    self._work_action(slot, ticker, bot, action, current_amount, bp)
 
             except Exception as err:
                 self._log_error(slot, ticker, err)
-

@@ -113,3 +113,16 @@ class CscalpClient:
             "ticker": ticker,
             "orderId": order_id
         })
+    
+    def sync_orders(self, slot: str, ticker: str, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Декларативная синхронизация заявок:
+        orders = [{'side': 'BUY', 'amount': 10, 'price': None}, ...]
+        Пустой список [] снимает все заявки по тикеру.
+        """
+        return self._request("POST", "/sync-orders", json={
+            "slot": slot,
+            "ticker": ticker,
+            "orders": orders
+        })
+
