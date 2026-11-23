@@ -1,0 +1,75 @@
+from for_strategies.classic_indicators import *
+from for_strategies.classic_indicators2 import *
+from for_strategies.help_indicators import *
+from for_strategies.ml_indicators import *
+from for_strategies.other_indicators import *
+from for_strategies.pva_indicators import *
+from for_strategies.pva2_indicators import *
+from for_strategies.vsa_indicators import *
+from for_strategies.zigzag_indicators import *
+from for_strategies.fix_params import *
+from utils.work_dfs.load_df import simple_load_df
+from utils.drawing.chart import draw_bars_chart,draw_bars_chart_wo_vol
+from utils.drawing.indicators import draw_wzp
+import matplotlib.pyplot as plt
+from testing.test_constants import *
+# PATH_DF = '_data_for_tests\_before_opt\ALRS_5_1787155697.parquet'
+
+df = simple_load_df(PATH_DF)
+# df = df.iloc[-80:]
+period=10
+multiplier=3
+max_period = 55
+
+# p1=10
+# p2=10
+# p3=25
+# p1,p2=fix_two_periods_hm(p1,p2,max_period)
+# print(p1,p2,p3)
+# p1,p2,p3=fix_three_periods_hm(p1,p2,p3,max_period)
+# if p2 < p3:
+#     p3 = p2
+# print(p1,p2,p3)
+
+
+    
+
+# df = add_zigzag_window_210926(df)
+# df = add_zigzag_window_260926(df,80)
+# df = add_pattern18_zzw_260926(df)
+# df = add_pattern18_zzw_260926(df)
+
+# df['stair_pc'] = df['stair']
+# df = add_perchan_sma(df)
+# df = add_perchan_mid(df)
+# df = add_two_perchan(df)
+
+
+df = add_ratio_2ext_roll_281026(df)
+print(df.tail(20))
+# print(df['ave_up'].isna().sum())
+# print(df[['wzp1','idx_wzp1','wzp2','idx_wzp2','wzp3','idx_wzp3','wzp4','idx_wzp4',   'wzp5',  'idx_wzp5',  'wzp6',  'idx_wzp6',   'wzp7',  'idx_wzp7',   'wzp8',  'idx_wzp8']].tail())
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+
+draw_bars_chart_wo_vol(df, ax=ax1)
+for kind in ('l_max', 'l_min', 'r_max','r_min'):
+    ax1.plot(df[kind])
+
+# for kind in ('dvsai', 'dvsaima', 'dvsaiu', 'dvsaid'):
+#     ax2.plot(df[kind])
+# ax2.plot(df['fdi'])
+# ax2.plot(df['hurst'])
+# ax2.plot(df['vhf'])
+# ax2.plot(df['vr'])
+# ax2.plot(df['vr_z'])
+# ax2.plot(df['rc_z'])
+# ax2.plot(df['pct_rank'])
+# ax2.plot(df['blender_score'])
+# plt.plot(df['ave_up'])
+# plt.plot(df['ave_down'])
+# plt.plot(df['stair_pc_windowed'],color='blue')
+# plt.plot(df['top_ext'],color='green')
+# plt.plot(df['bottom_ext'],color='black')
+# draw_wzp(df)
+plt.tight_layout()
+plt.show()

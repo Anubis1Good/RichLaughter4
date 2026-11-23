@@ -1,0 +1,32 @@
+from strategies.BaseTE import BaseTE
+
+
+class TestTE(BaseTE):
+    def __init__(self, symbol='Test',price_step=None,mode=None, stop=None, take=None):
+        super().__init__(symbol, price_step, mode, stop, take)
+        self.needs_info = {'chart':True,'full_glass':True}
+        self.type_te = 2
+        # tdata - trading data
+    def preprocessing(self,tdata):
+        pdata = {}
+        df = tdata['chart']
+        df['test_top_level'] = df['high'].rolling(20).max()
+        df['test_bottom_level'] = df['low'].rolling(20).min()
+        top_level = df['test_top_level'].iat[-1]
+        bottom_level = df['test_bottom_level'].iat[-1]
+        # print(self.symbol,tdata)
+        pdata['levels'] = [top_level,bottom_level]
+        return pdata
+    
+    # pdata - processed data
+    def get_raw_action(self,pdata):
+        return 'spred_all_level'
+        return 'test'
+    
+
+class CloseAllTE(BaseTE):
+    def __init__(self, symbol='Test', price_step=None, mode=None, stop=None, take=None):
+        super().__init__(symbol, price_step, mode, stop, take)
+    
+    def get_raw_action(self, pdata):
+        return 'close_all'

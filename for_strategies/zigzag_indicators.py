@@ -1,0 +1,3315 @@
+import pandas as pd
+import numpy as np
+import re
+
+# GOOD INDICATOR
+def add_precent_zigzag(df:pd.DataFrame, source='high_low', reversal=0.1, use_pct=True):
+    """
+    Рабочий индикатор ZigZag с правильным отображением линий
+    
+    Параметры:
+    df - DataFrame с колонками: high, low, close
+    source - 'high_low' (по экстремумам) или 'close' (по ценам закрытия)
+    reversal - величина разворота (в % если use_pct=True, в пунктах если False)
+    use_pct - использовать проценты или абсолютные значения для разворота
+    """
+    df = df.copy()
+    
+    # Выбор источника данных
+    if source == 'high_low':
+        prices = df[['high', 'low']].values
+    elif source == 'close':
+        prices = df[['close', 'close']].values
+    else:
+        raise ValueError("source должен быть 'high_low' или 'close'")
+    
+    highs = prices[:, 0]
+    lows = prices[:, 1]
+    size = len(df)
+    
+    # Инициализация массивов
+    zz = np.full(size, np.nan)
+    direction = np.zeros(size, dtype=np.int8)  # 1=up, -1=down
+    
+    # Начальные условия
+    direction[0] = 1
+    last_pivot = highs[0]
+    last_pivot_idx = 0
+    zz[0] = last_pivot
+    
+    for i in range(1, size):
+        high = highs[i]
+        low = lows[i]
+        
+        if direction[i-1] == 1:  # Предыдущее направление - вверх
+            # Обновляем максимум
+            if high > last_pivot:
+                zz[last_pivot_idx] = np.nan  # Удаляем старый максимум
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            
+            # Проверяем разворот
+            threshold = last_pivot * (1 - reversal/100) if use_pct else last_pivot - reversal
+            if low <= threshold:
+                direction[i] = -1
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = 1
+                
+        else:  # Предыдущее направление - вниз
+            # Обновляем минимум
+            if low < last_pivot:
+                zz[last_pivot_idx] = np.nan  # Удаляем старый минимум
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            
+            # Проверяем разворот
+            threshold = last_pivot * (1 + reversal/100) if use_pct else last_pivot + reversal
+            if high >= threshold:
+                direction[i] = 1
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = -1
+    
+    # Соединяем точки линиями
+    zz_final = np.full(size, np.nan)
+    start_idx = None
+    start_val = np.nan
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if start_idx is not None:
+                # Линейная интерполяция между точками
+                zz_final[start_idx:i+1] = np.linspace(start_val, zz[i], i - start_idx + 1)
+            start_idx = i
+            start_val = zz[i]
+    
+    df['zigzag'] = zz_final
+    df['zigzag_direction'] = direction
+    return df
+
+def add_dynamic_zigzag(df:pd.DataFrame, source='high_low', n_std=1.5, method='std', period=20):
+    """
+    ZigZag с динамическим reversal на основе волатильности
+    
+    Параметры:
+    df - DataFrame с колонками: high, low, close
+    source - 'high_low' (по экстремумам) или 'close' (по ценам закрытия)
+    n_std - множитель для std или среднего (1.5 по умолчанию)
+    method - 'std' (стандартное отклонение) или 'mean' (средний диапазон)
+    period - период для расчета волатильности
+    """
+    df = df.copy()
+    
+    # Проверка на достаточное количество данных
+    if len(df) < period:
+        raise ValueError(f"Недостаточно данных. Требуется минимум {period} баров")
+    
+    # Выбор источника данных
+    if source == 'high_low':
+        prices = df[['high', 'low']].values
+    elif source == 'close':
+        prices = df[['close', 'close']].values
+    else:
+        raise ValueError("source должен быть 'high_low' или 'close'")
+    
+    highs = prices[:, 0]
+    lows = prices[:, 1]
+    size = len(df)
+    
+    # Расчет динамического порога разворота
+    if method == 'std':
+        rolling_std = df['close'].rolling(period).std().bfill()
+        reversal_values = rolling_std * n_std
+    elif method == 'mean':
+        ranges = df['high'] - df['low']
+        reversal_values = ranges.rolling(period).mean().bfill() * n_std
+    else:
+        raise ValueError("method должен быть 'std' или 'mean'")
+    
+    # Инициализация массивов
+    zz = np.full(size, np.nan)
+    direction = np.zeros(size, dtype=np.int8)  # 1=up, -1=down
+    
+    # Начальные условия (используем первые доступные значения)
+    first_valid = max(1, period-1)  # Первый валидный индекс после заполнения rolling
+    direction[:first_valid] = 1
+    last_pivot = highs[first_valid]
+    last_pivot_idx = first_valid
+    zz[first_valid] = last_pivot
+    
+    for i in range(first_valid+1, size):
+        high = highs[i]
+        low = lows[i]
+        reversal = reversal_values.iloc[i]  # Используем iloc для безопасного доступа
+        
+        if direction[i-1] == 1:  # Предыдущее направление - вверх
+            # Обновляем максимум
+            if high > last_pivot:
+                zz[last_pivot_idx] = np.nan  # Удаляем старый максимум
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            
+            # Проверяем разворот
+            threshold = last_pivot - reversal
+            if low <= threshold:
+                direction[i] = -1
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = 1
+                
+        else:  # Предыдущее направление - вниз
+            # Обновляем минимум
+            if low < last_pivot:
+                zz[last_pivot_idx] = np.nan  # Удаляем старый минимум
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            
+            # Проверяем разворот
+            threshold = last_pivot + reversal
+            if high >= threshold:
+                direction[i] = 1
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = -1
+    
+    # Соединяем точки линиями
+    zz_final = np.full(size, np.nan)
+    start_idx = None
+    start_val = np.nan
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if start_idx is not None:
+                # Линейная интерполяция между точками
+                zz_final[start_idx:i+1] = np.linspace(start_val, zz[i], i - start_idx + 1)
+            start_idx = i
+            start_val = zz[i]
+    
+    df['zigzag'] = zz_final
+    df['zigzag_direction'] = direction
+    df['reversal_threshold'] = reversal_values
+    return df
+
+# Good variant
+def add_dzz_peaks(df: pd.DataFrame, source='high_low', n_std=1.5, method='std', period=20,drop_last=True):
+    """
+    add 'zigzag','zigzag_peaks'
+    ZigZag с динамическим reversal на основе волатильности
+    
+    Параметры:
+    df - DataFrame с колонками: high, low, close
+    source - 'high_low' (по экстремумам) или 'close' (по ценам закрытия)
+    n_std - множитель для std или среднего (1.5 по умолчанию)
+    method - 'std' (стандартное отклонение) или 'mean' (средний диапазон)
+    period - период для расчета волатильности
+    
+    Возвращает:
+    df с колонками:
+        zigzag - линейно интерполированные значения зигзага
+        zigzag_peaks - точки перелома (пики/впадины)
+        zigzag_direction - направление (1=up, -1=down)
+        reversal_threshold - порог разворота
+    """
+    df = df.copy()
+    
+    # Проверка на достаточное количество данных
+    if len(df) < period:
+        raise ValueError(f"Недостаточно данных. Требуется минимум {period} баров")
+    
+    # Выбор источника данных
+    if source == 'high_low':
+        prices = df[['high', 'low']].values
+    elif source == 'close':
+        prices = df[['close', 'close']].values
+    else:
+        raise ValueError("source должен быть 'high_low' или 'close'")
+    
+    highs = prices[:, 0]
+    lows = prices[:, 1]
+    size = len(df)
+    
+    # Расчет динамического порога разворота
+    if method == 'std':
+        rolling_std = df['close'].rolling(period).std().bfill()
+        reversal_values = rolling_std * n_std
+    elif method == 'mean':
+        ranges = df['high'] - df['low']
+        reversal_values = ranges.rolling(period).mean().bfill() * n_std
+    else:
+        raise ValueError("method должен быть 'std' или 'mean'")
+    
+    # Инициализация массивов
+    zz = np.full(size, np.nan)  # Точки разворота
+    direction = np.zeros(size, dtype=np.int8)  # 1=up, -1=down
+    
+    # Начальные условия
+    first_valid = max(1, period-1)  # Первый валидный индекс после заполнения rolling
+    direction[:first_valid] = 1
+    last_pivot = highs[first_valid]
+    last_pivot_idx = first_valid
+    zz[first_valid] = last_pivot  # Первая точка
+    
+    for i in range(first_valid+1, size):
+        high = highs[i]
+        low = lows[i]
+        reversal = reversal_values.iloc[i]
+        prev_dir = direction[i-1]
+        
+        if prev_dir == 1:  # Предыдущее направление - вверх
+            # Сначала проверяем обновление максимума
+            if high > last_pivot:
+                # Удаляем старый максимум
+                zz[last_pivot_idx] = np.nan
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+                direction[i] = 1  # Подтверждаем текущее направление
+            # Затем проверяем разворот (только если не обновили максимум)
+            elif low <= last_pivot - reversal:
+                direction[i] = -1
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = 1
+                
+        else:  # Предыдущее направление - вниз
+            # Сначала проверяем обновление минимума
+            if low < last_pivot:
+                # Удаляем старый минимум
+                zz[last_pivot_idx] = np.nan
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+                direction[i] = -1  # Подтверждаем текущее направление
+            # Затем проверяем разворот (только если не обновили минимум)
+            elif high >= last_pivot + reversal:
+                direction[i] = 1
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = -1
+    
+    # Сохраняем точки перелома до интерполяции
+    if drop_last:
+        zz[-1] = np.nan
+    df['zigzag_peaks'] = zz.copy()
+    
+    # Линейная интерполяция между точками для непрерывного зигзага
+    zz_final = np.full(size, np.nan)
+    start_idx = None
+    start_val = np.nan
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if start_idx is not None:
+                zz_final[start_idx:i+1] = np.linspace(start_val, zz[i], i - start_idx + 1)
+            start_idx = i
+            start_val = zz[i]
+    
+    df['zigzag'] = zz_final
+    df['zigzag_direction'] = direction
+    df['reversal_threshold'] = reversal_values
+    
+    return df
+
+
+def add_zigzag180826(df: pd.DataFrame, n_std: float = 1.5, period: int = 20):
+    """
+    ZigZag индикатор.
+    
+    Параметры:
+    df - DataFrame с колонками: high, low, close
+    n_std - множитель для std
+    period - период для расчета волатильности
+    
+    Возвращает:
+    df с колонками:
+        zigzag - линейно интерполированные значения зигзага
+        zigzag_peaks - точки перелома
+        zigzag_direction - направление (1=up, -1=down)
+        reversal_threshold - порог разворота
+    """
+    df = df.copy()
+    
+    rolling_std = df['close'].rolling(period).std().bfill()
+    reversal_values = rolling_std * n_std
+    
+    size = len(df)
+    zz = np.full(size, np.nan)
+    direction = np.zeros(size, dtype=np.int8)
+    
+    # Первая точка - пик
+    first_idx = 0
+    first_high = df['high'].iloc[first_idx]
+    first_low = df['low'].iloc[first_idx]
+    
+    # Вторая точка
+    second_idx = 1
+    second_high = df['high'].iloc[second_idx]
+    second_low = df['low'].iloc[second_idx]
+    
+    if second_high > first_high:
+        # Направление 1: точка 1 - локальный минимум, точка 2 - локальный максимум
+        direction[first_idx] = 1
+        zz[first_idx] = first_low
+        local_min = first_low
+        local_min_idx = first_idx
+        local_max = second_high
+        local_max_idx = second_idx
+        zz[second_idx] = second_high
+        direction[second_idx] = 1
+        current_dir = 1
+    else:
+        # Направление -1: точка 1 - локальный максимум, точка 2 - локальный минимум
+        direction[first_idx] = -1
+        zz[first_idx] = first_high
+        local_max = first_high
+        local_max_idx = first_idx
+        local_min = second_low
+        local_min_idx = second_idx
+        zz[second_idx] = second_low
+        direction[second_idx] = -1
+        current_dir = -1
+    
+    for i in range(second_idx + 1, size):
+        high = df['high'].iloc[i]
+        low = df['low'].iloc[i]
+        reversal = reversal_values.iloc[i]
+        
+        if current_dir == 1:
+            if high > local_max:
+                # Обновляем максимум
+                zz[local_max_idx] = np.nan
+                local_max = high
+                local_max_idx = i
+                zz[i] = local_max
+                direction[i] = 1
+            elif local_max - low > reversal:
+                # Разворот вниз
+                zz[local_max_idx] = local_max
+                current_dir = -1
+                local_min = low
+                local_min_idx = i
+                zz[i] = local_min
+                direction[i] = -1
+            else:
+                direction[i] = 1
+        else:  # current_dir == -1
+            if low < local_min:
+                # Обновляем минимум
+                zz[local_min_idx] = np.nan
+                local_min = low
+                local_min_idx = i
+                zz[i] = local_min
+                direction[i] = -1
+            elif high - local_min > reversal:
+                # Разворот вверх
+                zz[local_min_idx] = local_min
+                current_dir = 1
+                local_max = high
+                local_max_idx = i
+                zz[i] = local_max
+                direction[i] = 1
+            else:
+                direction[i] = -1
+    
+    # Линейная интерполяция
+    zz_final = np.full(size, np.nan)
+    start_idx = None
+    start_val = np.nan
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if start_idx is not None:
+                zz_final[start_idx:i+1] = np.linspace(start_val, zz[i], i - start_idx + 1)
+            start_idx = i
+            start_val = zz[i]
+    
+    df['zigzag'] = zz_final
+    df['zigzag_direction'] = direction
+    
+    df['zigzag_peaks'] = np.where(
+        ((df['zigzag'].shift(1) < df['zigzag']) & (df['zigzag'] > df['zigzag'].shift(-1))) |
+        ((df['zigzag'].shift(1) > df['zigzag']) & (df['zigzag'] < df['zigzag'].shift(-1))),
+        df['zigzag'],
+        np.nan
+    )
+    
+    df['reversal_threshold'] = reversal_values
+
+
+    return df
+
+
+
+def add_percent_zz190826(df: pd.DataFrame, source='high_low', percent_threshold=0.1, drop_last=False):
+    """
+    add 'zigzag','zigzag_peaks'
+    ZigZag с динамическим reversal на основе процентного отклонения
+    
+    Параметры:
+    df - DataFrame с колонками: high, low, close
+    source - 'high_low' (по экстремумам) или 'close' (по ценам закрытия)
+    percent_threshold - процент отклонения для разворота (0.1 = 0.1%)
+    drop_last - исключать последний бар (еще не сформировавшийся)
+    
+    Возвращает:
+    df с колонками:
+        zigzag - линейно интерполированные значения зигзага
+        zigzag_peaks - точки перелома (пики/впадины)
+        zigzag_direction - направление (1=up, -1=down)
+        reversal_threshold - порог разворота (в абсолютных значениях)
+    """
+    df = df.copy()
+    
+    # Выбор источника данных
+    if source == 'high_low':
+        prices = df[['high', 'low']].values
+    elif source == 'close':
+        prices = df[['close', 'close']].values
+    else:
+        raise ValueError("source должен быть 'high_low' или 'close'")
+    
+    highs = prices[:, 0]
+    lows = prices[:, 1]
+    size = len(df)
+    
+    # Инициализация массивов
+    zz = np.full(size, np.nan)  # Точки разворота
+    direction = np.zeros(size, dtype=np.int8)  # 1=up, -1=down
+    reversal_values = np.full(size, np.nan)  # Пороги разворота
+    
+    # Начальные условия
+    direction[0] = 1  # Начинаем с восходящего тренда
+    last_pivot = highs[0]
+    last_pivot_idx = 0
+    zz[0] = last_pivot  # Первая точка
+    
+    for i in range(1, size):
+        high = highs[i]
+        low = lows[i]
+        reversal = last_pivot * (percent_threshold / 100)  # Вычисляем процентный порог
+        reversal_values[i] = reversal  # Сохраняем порог
+        prev_dir = direction[i-1]
+        
+        if prev_dir == 1:  # Предыдущее направление - вверх
+            # Сначала проверяем обновление максимума
+            if high > last_pivot:
+                # Удаляем старый максимум
+                zz[last_pivot_idx] = np.nan
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+                direction[i] = 1  # Подтверждаем текущее направление
+            # Затем проверяем разворот (только если не обновили максимум)
+            elif low <= last_pivot - reversal:
+                direction[i] = -1
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = 1
+                
+        else:  # Предыдущее направление - вниз
+            # Сначала проверяем обновление минимума
+            if low < last_pivot:
+                # Удаляем старый минимум
+                zz[last_pivot_idx] = np.nan
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+                direction[i] = -1  # Подтверждаем текущее направление
+            # Затем проверяем разворот (только если не обновили минимум)
+            elif high >= last_pivot + reversal:
+                direction[i] = 1
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = -1
+    
+    # Сохраняем точки перелома до интерполяции
+    if drop_last:
+        zz[-1] = np.nan
+
+    
+    # Линейная интерполяция между точками для непрерывного зигзага
+    zz_final = np.full(size, np.nan)
+    start_idx = None
+    start_val = np.nan
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if start_idx is not None:
+                zz_final[start_idx:i+1] = np.linspace(start_val, zz[i], i - start_idx + 1)
+            start_idx = i
+            start_val = zz[i]
+
+    df['zigzag'] = zz_final
+    df['zigzag_peaks'] = np.where(
+        ((df['zigzag'].shift(1) < df['zigzag']) & (df['zigzag'] > df['zigzag'].shift(-1))) |
+        ((df['zigzag'].shift(1) > df['zigzag']) & (df['zigzag'] < df['zigzag'].shift(-1))),
+        df['zigzag'],
+        np.nan
+    )
+    df['zigzag_direction'] = direction
+    df['reversal_threshold'] = reversal_values
+    
+    return df
+
+def add_percent_zz_peaks(df: pd.DataFrame, source='high_low', percent_threshold=0.1, drop_last=True):
+    """
+    add 'zigzag','zigzag_peaks'
+    ZigZag с динамическим reversal на основе процентного отклонения
+    
+    Параметры:
+    df - DataFrame с колонками: high, low, close
+    source - 'high_low' (по экстремумам) или 'close' (по ценам закрытия)
+    percent_threshold - процент отклонения для разворота (0.1 = 0.1%)
+    drop_last - исключать последний бар (еще не сформировавшийся)
+    
+    Возвращает:
+    df с колонками:
+        zigzag - линейно интерполированные значения зигзага
+        zigzag_peaks - точки перелома (пики/впадины)
+        zigzag_direction - направление (1=up, -1=down)
+        reversal_threshold - порог разворота (в абсолютных значениях)
+    """
+    df = df.copy()
+    
+    # Выбор источника данных
+    if source == 'high_low':
+        prices = df[['high', 'low']].values
+    elif source == 'close':
+        prices = df[['close', 'close']].values
+    else:
+        raise ValueError("source должен быть 'high_low' или 'close'")
+    
+    highs = prices[:, 0]
+    lows = prices[:, 1]
+    size = len(df)
+    
+    # Инициализация массивов
+    zz = np.full(size, np.nan)  # Точки разворота
+    direction = np.zeros(size, dtype=np.int8)  # 1=up, -1=down
+    reversal_values = np.full(size, np.nan)  # Пороги разворота
+    
+    # Начальные условия
+    direction[0] = 1  # Начинаем с восходящего тренда
+    last_pivot = highs[0]
+    last_pivot_idx = 0
+    zz[0] = last_pivot  # Первая точка
+    
+    for i in range(1, size):
+        high = highs[i]
+        low = lows[i]
+        reversal = last_pivot * (percent_threshold / 100)  # Вычисляем процентный порог
+        reversal_values[i] = reversal  # Сохраняем порог
+        prev_dir = direction[i-1]
+        
+        if prev_dir == 1:  # Предыдущее направление - вверх
+            # Сначала проверяем обновление максимума
+            if high > last_pivot:
+                # Удаляем старый максимум
+                zz[last_pivot_idx] = np.nan
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+                direction[i] = 1  # Подтверждаем текущее направление
+            # Затем проверяем разворот (только если не обновили максимум)
+            elif low <= last_pivot - reversal:
+                direction[i] = -1
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = 1
+                
+        else:  # Предыдущее направление - вниз
+            # Сначала проверяем обновление минимума
+            if low < last_pivot:
+                # Удаляем старый минимум
+                zz[last_pivot_idx] = np.nan
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+                direction[i] = -1  # Подтверждаем текущее направление
+            # Затем проверяем разворот (только если не обновили минимум)
+            elif high >= last_pivot + reversal:
+                direction[i] = 1
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = -1
+    
+    # Сохраняем точки перелома до интерполяции
+    if drop_last:
+        zz[-1] = np.nan
+    df['zigzag_peaks'] = zz.copy()
+    
+    # Линейная интерполяция между точками для непрерывного зигзага
+    zz_final = np.full(size, np.nan)
+    start_idx = None
+    start_val = np.nan
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if start_idx is not None:
+                zz_final[start_idx:i+1] = np.linspace(start_val, zz[i], i - start_idx + 1)
+            start_idx = i
+            start_val = zz[i]
+    
+    df['zigzag'] = zz_final
+    df['zigzag_direction'] = direction
+    df['reversal_threshold'] = reversal_values
+    
+    return df
+
+def add_dzz_level_channel(df:pd.DataFrame):
+    """add 'upper_channel','lower_channel'"""
+    points = df[~pd.isna(df['zigzag_peaks'])].iloc[:-1]
+    df['upper_channel'] = points[points['zigzag_direction'] == 1]['zigzag_peaks']
+    df['lower_channel'] = points[points['zigzag_direction'] == -1]['zigzag_peaks']
+
+    df['upper_channel'] = df['upper_channel'].ffill()
+    df['lower_channel'] = df['lower_channel'].ffill()
+    return df
+
+def add_dzz_line_channel(df:pd.DataFrame, source='high_low', n_std=1.5, method='std', period=20):
+    """
+    ZigZag с динамическим reversal и линиями канала
+    
+    Параметры:
+    df - DataFrame с колонками: high, low, close
+    source - 'high_low' (по экстремумам) или 'close' (по ценам закрытия)
+    n_std - множитель для std или среднего (1.5 по умолчанию)
+    method - 'std' (стандартное отклонение) или 'mean' (средний диапазон)
+    period - период для расчета волатильности
+    
+    Возвращает:
+    df с колонками:
+        zigzag - линейно интерполированные значения зигзага
+        zigzag_peaks - точки перелома
+        upper_channel - верхняя линия канала
+        lower_channel - нижняя линия канала
+        reversal_threshold - порог разворота
+    """
+    df = df.copy()
+    
+    # Проверка на достаточное количество данных
+    if len(df) < period:
+        raise ValueError(f"Недостаточно данных. Требуется минимум {period} баров")
+    
+    # Выбор источника данных
+    if source == 'high_low':
+        prices = df[['high', 'low']].values
+    elif source == 'close':
+        prices = df[['close', 'close']].values
+    else:
+        raise ValueError("source должен быть 'high_low' или 'close'")
+    
+    highs = prices[:, 0]
+    lows = prices[:, 1]
+    size = len(df)
+    
+    # Расчет динамического порога разворота
+    if method == 'std':
+        rolling_std = df['close'].rolling(period).std().bfill()
+        reversal_values = rolling_std * n_std
+    elif method == 'mean':
+        ranges = df['high'] - df['low']
+        reversal_values = ranges.rolling(period).mean().bfill() * n_std
+    else:
+        raise ValueError("method должен быть 'std' или 'mean'")
+    
+    # Инициализация массивов
+    zz = np.full(size, np.nan)  # Точки разворота
+    direction = np.zeros(size, dtype=np.int8)  # 1=up, -1=down
+    
+    # Начальные условия
+    first_valid = max(1, period-1)
+    direction[:first_valid] = 1
+    last_pivot = highs[first_valid]
+    last_pivot_idx = first_valid
+    zz[first_valid] = last_pivot
+    
+    for i in range(first_valid+1, size):
+        high = highs[i]
+        low = lows[i]
+        reversal = reversal_values.iloc[i]
+        
+        if direction[i-1] == 1:  # Предыдущее направление - вверх
+            if high > last_pivot:
+                zz[last_pivot_idx] = np.nan
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            
+            threshold = last_pivot - reversal
+            if low <= threshold:
+                direction[i] = -1
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = 1
+                
+        else:  # Предыдущее направление - вниз
+            if low < last_pivot:
+                zz[last_pivot_idx] = np.nan
+                last_pivot = low
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            
+            threshold = last_pivot + reversal
+            if high >= threshold:
+                direction[i] = 1
+                last_pivot = high
+                last_pivot_idx = i
+                zz[i] = last_pivot
+            else:
+                direction[i] = -1
+    zz[-1] = np.nan
+    # Сохраняем точки перелома
+    df['zigzag_peaks'] = zz.copy()
+    
+    # Линейная интерполяция для зигзага
+    zz_final = np.full(size, np.nan)
+    start_idx = None
+    start_val = np.nan
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if start_idx is not None:
+                zz_final[start_idx:i+1] = np.linspace(start_val, zz[i], i - start_idx + 1)
+            start_idx = i
+            start_val = zz[i]
+    
+    df['zigzag'] = zz_final
+    df['zigzag_direction'] = direction
+    df['reversal_threshold'] = reversal_values
+    
+    # Собираем верхние и нижние точки
+    upper_points = []
+    lower_points = []
+    
+    for i in range(size):
+        if not np.isnan(zz[i]):
+            if direction[i] == -1:
+                upper_points.append((i, zz[i]))
+            else:
+                lower_points.append((i, zz[i]))
+    
+    # Инициализация каналов
+    upper_channel = np.full(size, np.nan)
+    lower_channel = np.full(size, np.nan)
+    
+    # Функция для построения канала
+    def build_channel(points, channel_array):
+        if len(points) < 2:
+            return
+        
+        # Для всех точек, начиная со второй
+        for i in range(1, len(points)):
+            prev_idx, prev_val = points[i-1]
+            curr_idx, curr_val = points[i]
+            
+            # Рассчитываем наклон между предыдущими точками
+            slope = (curr_val - prev_val) / (curr_idx - prev_idx)
+            
+            # Определяем конечный индекс сегмента
+            if i < len(points) - 1:
+                end_idx = points[i+1][0]
+            else:
+                end_idx = size - 1  # До конца графика
+            
+            # Строим линию от текущей точки до конца сегмента
+            for k in range(curr_idx, min(end_idx + 1, size)):
+                channel_array[k] = curr_val + slope * (k - curr_idx)
+    
+    # Строим каналы
+    build_channel(upper_points, upper_channel)
+    build_channel(lower_points, lower_channel)
+    
+    # Добавляем каналы в датафрейм
+    df['upper_channel'] = upper_channel
+    df['lower_channel'] = lower_channel
+    
+    return df
+
+#good indicator
+def add_analys_dzz(df, period_sma=3):
+    """add 'trend','trend_sma'"""
+    # Создаем явную копию DataFrame
+    df = df.copy()
+    df['trend'] = np.nan
+    
+    # Создаем копию для работы с пиками
+    peacks = df[~df['zigzag_peaks'].isna()].copy()  # Явное копирование
+    
+    if len(peacks) < 4:
+        df['trend'] = 0
+        df['trend_sma'] = 0
+        return df
+    
+    # Условия для тренда
+    up_condition = (peacks['zigzag_peaks'] > peacks['zigzag_peaks'].shift(2)) & \
+                  (peacks['zigzag_peaks'].shift(1) > peacks['zigzag_peaks'].shift(3))
+    down_condition = (peacks['zigzag_peaks'] < peacks['zigzag_peaks'].shift(2)) & \
+                    (peacks['zigzag_peaks'].shift(1) < peacks['zigzag_peaks'].shift(3))
+    
+    # Используем .loc для безопасного присвоения
+    peacks.loc[:, 'trend'] = 0  # Инициализация через .loc
+    peacks.loc[up_condition, 'trend'] = 1
+    peacks.loc[down_condition, 'trend'] = -1
+    
+    # Считаем SMA
+    peacks.loc[:, 'trend_sma'] = peacks['trend'].rolling(period_sma).mean()
+    
+    # Заполняем основной DataFrame
+    df['trend'] = peacks['trend'].reindex(df.index).ffill().fillna(0)
+    df['trend_sma'] = peacks['trend_sma'].reindex(df.index).ffill().fillna(0)
+    
+    return df
+
+def add_analys_dzz180826(df, period_sma=3):
+    """add 'trend','trend_sma' \n
+    180826"""
+    # Создаем явную копию DataFrame
+    df = df.copy()
+    df['trend'] = np.nan
+    
+    # Создаем копию для работы с пиками
+    peacks = df[~df['zp_s'].isna()].copy()  # Явное копирование
+    
+    if len(peacks) < 4:
+        df['trend'] = 0
+        df['trend_sma'] = 0
+        return df
+    
+    # Условия для тренда
+    up_condition = (peacks['zp_s'] > peacks['zp_s'].shift(2)) & \
+                  (peacks['zp_s'].shift(1) > peacks['zp_s'].shift(3))
+    down_condition = (peacks['zp_s'] < peacks['zp_s'].shift(2)) & \
+                    (peacks['zp_s'].shift(1) < peacks['zp_s'].shift(3))
+    
+    # Используем .loc для безопасного присвоения
+    peacks.loc[:, 'trend'] = 0  # Инициализация через .loc
+    peacks.loc[up_condition, 'trend'] = 1
+    peacks.loc[down_condition, 'trend'] = -1
+    
+    # Считаем SMA
+    peacks.loc[:, 'trend_sma'] = peacks['trend'].rolling(period_sma).mean()
+    
+    # Заполняем основной DataFrame
+    df['trend'] = peacks['trend'].reindex(df.index).ffill().fillna(0)
+    df['trend_sma'] = peacks['trend_sma'].reindex(df.index).ffill().fillna(0)
+    
+    return df
+
+def help_analiz_pattern18(row,threshold=0.2):
+    if pd.isna(row['zp1']):
+        return 'none_pattern'
+    big = 1 + threshold
+    small = 1 - threshold
+    if row['r12_23'] > big:
+        if row['r23_34'] > big:
+            if row['p1_2'] > 0:
+                return 'weak_short'
+            else:
+                return 'weak_long'
+        elif row['r23_34'] < small:
+            if row['p1_2'] > 0:
+                return 'strong_short'
+            else:
+                return 'strong_long'
+        else:
+            if row['p1_2'] > 0:
+                return 'enter_short_range'
+            else:
+                return 'enter_long_range'
+    elif row['r12_23'] < small:
+        if row['r23_34'] > big:
+            if row['p1_2'] > 0:
+                return 'btc'
+            else:
+                return 'bti'
+        elif row['r23_34'] < small:
+            if row['p1_2'] > 0:
+                return 'sow'
+            else:
+                return 'sos'
+        else:
+            if row['p1_2'] > 0:
+                return 'upthrust'
+            else:
+                return 'spring'
+    else:
+        if row['r23_34'] > big:
+            if row['p1_2'] > 0:
+                return 'narrowing_up'
+            else:
+                return 'narrowing_down'
+        elif row['r23_34'] < small:
+            if row['p1_2'] > 0:
+                return 'bui'
+            else:
+                return 'joc'
+        else:
+            if row['p1_2'] > 0:
+                return 'bottom_range'
+            else:
+                return 'top_range'
+def add_my_pattern_dzz(df:pd.DataFrame, threshold=0.2):
+    """add 'pattern18'"""
+    # Создаем явную копию DataFrame
+    df = df.copy()
+    # Создаем копию для работы с пиками
+    peacks = df[~df['zigzag_peaks'].isna()].copy()  # Явное копирование
+    if len(peacks) < 4:
+        df['pattern18'] = 'none_pattern'
+        return df
+    peacks['zp1'] = peacks['zigzag_peaks'].shift(3)
+    peacks['zp2'] = peacks['zigzag_peaks'].shift(2)
+    peacks['zp3'] = peacks['zigzag_peaks'].shift(1)
+    peacks['zp4'] = peacks['zigzag_peaks']
+    peacks['p1_2'] = peacks['zp1'] - peacks['zp2']
+    peacks['p2_3'] = peacks['zp2'] - peacks['zp3']
+    peacks['p3_4'] = peacks['zp3'] - peacks['zp4']
+    peacks['r12_23'] = abs(peacks['p1_2'] / peacks['p2_3'])
+    peacks['r23_34'] = abs(peacks['p2_3'] / peacks['p3_4'])
+    peacks['pattern'] = peacks.apply(lambda row: help_analiz_pattern18(row,threshold),axis=1)
+    df['pattern18'] = peacks['pattern']
+    df['pattern18'] = df['pattern18'].ffill()
+    
+    return df
+
+def add_pattern18_dzz(df: pd.DataFrame, threshold: float = 0.2, buffer_percent: float = 0.1) -> pd.DataFrame:
+    """
+    add 'pattern18', 'prev_pattern18', 
+                'zp1', 'zp2', 'zp3', 'zp4',
+                'bzp1', 'bzp2', 'bzp3', 'bzp4',
+                'target', 'btarget', 'mzp' \n
+    с классификацией паттернов зигзага и буферизованными точками
+    patterns:
+        'weak_short', 'weak_long',
+        'bui', 'joc',
+        'double_bottom', 'double_top',
+        'btc', 'bti',
+        'sow', 'sos',
+        'upthrust', 'spring',
+        'narrowing_up', 'narrowing_down',
+        'bui', 'joc',
+        'bottom_range', 'top_range'
+    Параметры:
+        df - DataFrame с колонкой 'zigzag_peaks'
+        threshold - порог для определения соотношения сегментов
+        buffer_percent - процент буфера (0.1 = 10%)
+    
+    Возвращает:
+        DataFrame с добавленными колонками
+    """
+    # Создаем копию DataFrame
+    result_df = df.copy()
+    
+    # Инициализируем колонки
+    result_df = result_df.assign(
+        pattern18=pd.NA, 
+        prev_pattern18=pd.NA,
+        bzp1=pd.NA, bzp2=pd.NA, bzp3=pd.NA, bzp4=pd.NA
+    )
+    
+    # Выбираем только точки пиков зигзага
+    peaks_mask = ~result_df['zigzag_peaks'].isna()
+    peaks = result_df.loc[peaks_mask].copy()
+    
+    # Недостаточно точек для анализа паттерна
+    if len(peaks) < 4:
+        return result_df.assign(
+            pattern18='none_pattern', 
+            prev_pattern18='none_pattern',
+            bzp1=pd.NA, bzp2=pd.NA, bzp3=pd.NA, bzp4=pd.NA
+        )
+    
+    # Вычисляем 4 последовательные точки
+    peaks = peaks.assign(
+        zp1=peaks['zigzag_peaks'].shift(3),
+        zp2=peaks['zigzag_peaks'].shift(2),
+        zp3=peaks['zigzag_peaks'].shift(1),
+        zp4=peaks['zigzag_peaks']
+    )
+    
+    # Удаляем строки с недостаточными данными
+    peaks = peaks.loc[~peaks['zp1'].isna()].copy()
+    
+    # Вычисляем разницы между точками
+    peaks = peaks.assign(
+        p1_2=peaks['zp1'] - peaks['zp2'],
+        p2_3=peaks['zp2'] - peaks['zp3'],
+        p3_4=peaks['zp3'] - peaks['zp4']
+    )
+    
+    # Вычисляем буферизованные точки
+    peaks = peaks.assign(
+        # Внешний буфер для bzp1 (направление зависит от p2_3)
+        bzp1=peaks['zp1'] - np.sign(peaks['p2_3']) * np.abs(peaks['p2_3']) * buffer_percent,
+        
+        # Внешний буфер для bzp2 (направление зависит от p2_3)
+        bzp2=peaks['zp2'] + np.sign(peaks['p2_3']) * np.abs(peaks['p2_3']) * buffer_percent,
+        
+        # Внутренний буфер для bzp3 (направление зависит от p3_4)
+        bzp3=peaks['zp3'] - np.sign(peaks['p3_4']) * np.abs(peaks['p3_4']) * buffer_percent,
+        
+        # Внутренний буфер для bzp4 (направление зависит от p3_4)
+        bzp4=peaks['zp4'] + np.sign(peaks['p3_4']) * np.abs(peaks['p3_4']) * buffer_percent
+    )
+        # Добавляем целевые точки
+    peaks = peaks.assign(
+        target=peaks['zp4'] - peaks['p2_3'],  # zp4 + (zp3 - zp4) = zp3
+        btarget=peaks['zp4'] - peaks['p2_3'] * (1 - buffer_percent/2),
+        mzp = (peaks['zp3'] + peaks['zp4']) / 2
+    )
+    # Остальной код без изменений
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r12_23 = np.abs(peaks['p1_2'] / peaks['p2_3'])
+        r23_34 = np.abs(peaks['p2_3'] / peaks['p3_4'])
+    
+    big = 1 + threshold
+    small = 1 - threshold
+    p1_2_pos = peaks['p1_2'] > 0
+    
+    conditions = [
+        (r12_23 > big) & (r23_34 > big) & p1_2_pos,
+        (r12_23 > big) & (r23_34 > big) & ~p1_2_pos,
+        (r12_23 > big) & (r23_34 < small) & p1_2_pos,
+        (r12_23 > big) & (r23_34 < small) & ~p1_2_pos,
+        (r12_23 > big) & (r23_34 >= small) & (r23_34 <= big) & p1_2_pos,
+        (r12_23 > big) & (r23_34 >= small) & (r23_34 <= big) & ~p1_2_pos,
+        (r12_23 < small) & (r23_34 > big) & p1_2_pos,
+        (r12_23 < small) & (r23_34 > big) & ~p1_2_pos,
+        (r12_23 < small) & (r23_34 < small) & p1_2_pos,
+        (r12_23 < small) & (r23_34 < small) & ~p1_2_pos,
+        (r12_23 < small) & (r23_34 >= small) & (r23_34 <= big) & p1_2_pos,
+        (r12_23 < small) & (r23_34 >= small) & (r23_34 <= big) & ~p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 > big) & p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 > big) & ~p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 < small) & p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 < small) & ~p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & ~(r23_34 < small) & ~(r23_34 > big) & p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & ~(r23_34 < small) & ~(r23_34 > big) & ~p1_2_pos
+    ]
+    
+    choices = [
+        'weak_short', 'weak_long',
+        'bui', 'joc',
+        'double_bottom', 'double_top',
+        'btc', 'bti',
+        'sow', 'sos',
+        'upthrust', 'spring',
+        'narrowing_up', 'narrowing_down',
+        'bui', 'joc',
+        'bottom_range', 'top_range'
+    ]
+    
+    peaks_pattern = pd.Series(
+        data=np.select(conditions, choices, default='none_pattern'),
+        index=peaks.index,
+        dtype='object'
+    )
+    
+    prev_peaks_pattern = peaks_pattern.shift(1)
+    prev_peaks_pattern.fillna('none_pattern', inplace=True)
+    
+    result_df['pattern18'] = peaks_pattern.reindex(result_df.index).ffill()
+    result_df['prev_pattern18'] = prev_peaks_pattern.reindex(result_df.index).ffill()
+    
+    result_df['pattern18'] = result_df['pattern18'].replace(pd.NA, 'none_pattern')
+    result_df['prev_pattern18'] = result_df['prev_pattern18'].replace(pd.NA, 'none_pattern')
+    
+    # Обновляем основной DataFrame всеми колонками
+    # Разделяем колонки по типам
+    num_cols = ['zp1', 'zp2', 'zp3', 'zp4', 
+               'bzp1', 'bzp2', 'bzp3', 'bzp4',
+               'target', 'btarget', 'mzp']
+    
+    # Создаем временный DataFrame с числовыми данными
+    num_data = peaks[num_cols].reindex(result_df.index).ffill()
+    for col in num_cols:
+        # Явное преобразование к float64 через numpy
+        result_df[col] = num_data[col].values.astype('float64')
+       
+    return result_df
+
+def add_pattern18_dzz_shifted(df: pd.DataFrame, threshold: float = 0.2, buffer_percent: float = 0.1) -> pd.DataFrame:
+    """
+    Версия индикатора, где все значения смещены на 1 пик назад
+    """
+    # Создаем копию DataFrame
+    result_df = df.copy()
+    
+    # Инициализируем колонки
+    result_df = result_df.assign(
+        pattern18='none_pattern', 
+        prev_pattern18='none_pattern',
+        zp1=pd.NA, zp2=pd.NA, zp3=pd.NA, zp4=pd.NA,
+        bzp1=pd.NA, bzp2=pd.NA, bzp3=pd.NA, bzp4=pd.NA,
+        target=pd.NA, btarget=pd.NA, mzp=pd.NA
+    )
+    
+    # Выбираем только точки пиков зигзага
+    peaks_mask = ~result_df['zigzag_peaks'].isna()
+    peaks = result_df.loc[peaks_mask].copy()
+    
+    # Недостаточно точек для анализа паттерна
+    if len(peaks) < 4:
+        return result_df
+    
+    # Вычисляем 4 последовательные точки (оригинальный расчет)
+    peaks = peaks.assign(
+        zp1=peaks['zigzag_peaks'].shift(3),
+        zp2=peaks['zigzag_peaks'].shift(2),
+        zp3=peaks['zigzag_peaks'].shift(1),
+        zp4=peaks['zigzag_peaks']
+    )
+    
+    # Удаляем строки с недостаточными данными
+    peaks = peaks.loc[~peaks['zp1'].isna()].copy()
+    
+    # Вычисляем разницы между точками
+    peaks = peaks.assign(
+        p1_2=peaks['zp1'] - peaks['zp2'],
+        p2_3=peaks['zp2'] - peaks['zp3'],
+        p3_4=peaks['zp3'] - peaks['zp4']
+    )
+    
+    # Вычисляем буферизованные точки
+    peaks = peaks.assign(
+        bzp1=peaks['zp1'] - np.sign(peaks['p2_3']) * np.abs(peaks['p2_3']) * buffer_percent,
+        bzp2=peaks['zp2'] + np.sign(peaks['p2_3']) * np.abs(peaks['p2_3']) * buffer_percent,
+        bzp3=peaks['zp3'] - np.sign(peaks['p3_4']) * np.abs(peaks['p3_4']) * buffer_percent,
+        bzp4=peaks['zp4'] + np.sign(peaks['p3_4']) * np.abs(peaks['p3_4']) * buffer_percent,
+        target=peaks['zp4'] - peaks['p2_3'],
+        btarget=peaks['zp4'] - peaks['p2_3'] * (1 - buffer_percent/2),
+        mzp=(peaks['zp3'] + peaks['zp4']) / 2
+    )
+    
+    # Определяем паттерны
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r12_23 = np.abs(peaks['p1_2'] / peaks['p2_3'])
+        r23_34 = np.abs(peaks['p2_3'] / peaks['p3_4'])
+    
+    big = 1 + threshold
+    small = 1 - threshold
+    p1_2_pos = peaks['p1_2'] > 0
+    
+    conditions = [
+        (r12_23 > big) & (r23_34 > big) & p1_2_pos,
+        (r12_23 > big) & (r23_34 > big) & ~p1_2_pos,
+        (r12_23 > big) & (r23_34 < small) & p1_2_pos,
+        (r12_23 > big) & (r23_34 < small) & ~p1_2_pos,
+        (r12_23 > big) & (r23_34 >= small) & (r23_34 <= big) & p1_2_pos,
+        (r12_23 > big) & (r23_34 >= small) & (r23_34 <= big) & ~p1_2_pos,
+        (r12_23 < small) & (r23_34 > big) & p1_2_pos,
+        (r12_23 < small) & (r23_34 > big) & ~p1_2_pos,
+        (r12_23 < small) & (r23_34 < small) & p1_2_pos,
+        (r12_23 < small) & (r23_34 < small) & ~p1_2_pos,
+        (r12_23 < small) & (r23_34 >= small) & (r23_34 <= big) & p1_2_pos,
+        (r12_23 < small) & (r23_34 >= small) & (r23_34 <= big) & ~p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 > big) & p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 > big) & ~p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 < small) & p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & (r23_34 < small) & ~p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & ~(r23_34 < small) & ~(r23_34 > big) & p1_2_pos,
+        (~(r12_23 < small) & ~(r12_23 > big)) & ~(r23_34 < small) & ~(r23_34 > big) & ~p1_2_pos
+    ]
+    
+    choices = [
+        'weak_short', 'weak_long',
+        'bui', 'joc',
+        'double_bottom', 'double_top',
+        'btc', 'bti',
+        'sow', 'sos',
+        'upthrust', 'spring',
+        'narrowing_up', 'narrowing_down',
+        'bui', 'joc',
+        'bottom_range', 'top_range'
+    ]
+    
+    peaks['pattern18'] = np.select(conditions, choices, default='none_pattern')
+    peaks['prev_pattern18'] = peaks['pattern18'].shift(1).fillna('none_pattern')
+    
+    # Ключевое изменение: смещаем все вычисленные значения на 1 пик назад
+    shifted_peaks = peaks.copy()
+    shifted_cols = ['pattern18', 'prev_pattern18',
+                   'zp1', 'zp2', 'zp3', 'zp4',
+                   'bzp1', 'bzp2', 'bzp3', 'bzp4',
+                   'target', 'btarget', 'mzp']
+    
+    for col in shifted_cols:
+        shifted_peaks[col] = shifted_peaks[col].shift(1)
+    
+    # Переносим смещенные значения в основной DataFrame
+    for col in shifted_cols:
+        # Для числовых колонок используем прямое присвоение
+        if col in ['zp1', 'zp2', 'zp3', 'zp4', 'bzp1', 'bzp2', 'bzp3', 'bzp4', 'target', 'btarget', 'mzp']:
+            result_df[col] = shifted_peaks[col].reindex(result_df.index).ffill()
+        # Для паттернов делаем ffill и заполнение
+        else:
+            result_df[col] = shifted_peaks[col].reindex(result_df.index).ffill().fillna('none_pattern')
+    
+    return result_df
+
+def add_pattern18_dzz_czd(df: pd.DataFrame, threshold: float = 0.2, buffer_percent: float = 0.1) -> pd.DataFrame:
+    """
+    Модифицированная версия индикатора паттернов зигзага.
+    Паттерны фиксируются только в момент смены направления зигзага.
+    """
+    result_df = df.copy()
+    
+    # Инициализация колонок с правильными типами данных
+    # Строковые колонки инициализируем строкой, числовые - np.nan
+    result_df = result_df.assign(
+        pattern18=pd.NA,  # строка
+        prev_pattern18=pd.NA,  # строка
+        bzp1=np.nan, bzp2=np.nan, bzp3=np.nan, bzp4=np.nan,
+        zp1=np.nan, zp2=np.nan, zp3=np.nan, zp4=np.nan,
+        target=np.nan, btarget=np.nan, mzp=np.nan
+    )
+    
+    # Проверка наличия необходимых колонок
+    if 'zigzag_direction' not in df.columns:
+        raise ValueError("DataFrame must contain 'zigzag_direction' column")
+    
+    # Находим моменты смены направления зигзага
+    direction_changes = result_df['zigzag_direction'].diff().ne(0)
+    change_indices = direction_changes[direction_changes].index.tolist()
+    
+    # Если нет смен направления, возвращаем исходный df
+    if len(change_indices) == 0:
+        result_df['pattern18'] = result_df['pattern18'].fillna('none_pattern')
+        result_df['prev_pattern18'] = result_df['prev_pattern18'].fillna('none_pattern')
+        return result_df
+    
+    # Собираем все пики зигзага
+    peaks_mask = ~result_df['zigzag_peaks'].isna()
+    peaks = result_df.loc[peaks_mask, 'zigzag_peaks']
+    
+    # Создаем список для хранения результатов
+    results = []
+    big = 1 + threshold
+    small = 1 - threshold
+    # Обрабатываем каждую смену направления
+    for i, change_idx in enumerate(change_indices):
+        # Получаем последние 4 пика до текущей смены направления
+        prev_peaks = peaks[peaks.index <= change_idx].tail(4)
+        
+        # Если не набралось 4 пика, пропускаем
+        if len(prev_peaks) < 4:
+            continue
+        
+        # Извлекаем 4 последних пика
+        zp1, zp2, zp3, zp4 = prev_peaks[-4:].values
+        
+        # Вычисляем разницы между точками
+        p1_2 = zp1 - zp2
+        p2_3 = zp2 - zp3
+        p3_4 = zp3 - zp4
+        
+        # Вычисляем буферизованные точки
+        bzp1 = zp1 - np.sign(p2_3) * abs(p2_3) * buffer_percent
+        bzp2 = zp2 + np.sign(p2_3) * abs(p2_3) * buffer_percent
+        bzp3 = zp3 - np.sign(p3_4) * abs(p3_4) * buffer_percent
+        bzp4 = zp4 + np.sign(p3_4) * abs(p3_4) * buffer_percent
+        
+        # Вычисляем целевые точки
+        target = zp4 - p2_3
+        btarget = zp4 - p2_3 * (1 - buffer_percent/2)
+        mzp = (zp3 + zp4) / 2
+        
+        # Вычисляем соотношения сегментов
+        with np.errstate(divide='ignore', invalid='ignore'):
+            r12_23 = abs(p1_2 / p2_3) if p2_3 != 0 else float('inf')
+            r23_34 = abs(p2_3 / p3_4) if p3_4 != 0 else float('inf')
+        
+        # Условия для классификации паттернов
+
+        p1_2_pos = p1_2 > 0
+        
+        # Определяем паттерн через последовательную проверку условий
+        pattern = 'none_pattern'
+        
+        if r12_23 > big and r23_34 > big:
+            pattern = 'weak_short' if p1_2_pos else 'weak_long'
+        elif r12_23 > big and r23_34 < small:
+            pattern = 'bui' if p1_2_pos else 'joc'
+        elif r12_23 > big and small <= r23_34 <= big:
+            pattern = 'double_bottom' if p1_2_pos else 'double_top'
+        elif r12_23 < small and r23_34 > big:
+            pattern = 'btc' if p1_2_pos else 'bti'
+        elif r12_23 < small and r23_34 < small:
+            pattern = 'sow' if p1_2_pos else 'sos'
+        elif r12_23 < small and small <= r23_34 <= big:
+            pattern = 'upthrust' if p1_2_pos else 'spring'
+        elif (small <= r12_23 <= big) and r23_34 > big:
+            pattern = 'narrowing_up' if p1_2_pos else 'narrowing_down'
+        elif (small <= r12_23 <= big) and r23_34 < small:
+            pattern = 'bui' if p1_2_pos else 'joc'
+        elif (small <= r12_23 <= big) and (small <= r23_34 <= big):
+            pattern = 'bottom_range' if p1_2_pos else 'top_range'
+        # Предыдущий паттерн
+        prev_pattern = 'none_pattern'
+        if results:
+            prev_pattern = results[-1]['pattern18']
+        
+        # Сохраняем результаты
+        results.append({
+            'index': change_idx,
+            'pattern18': pattern,
+            'prev_pattern18': prev_pattern,
+            'zp1': zp1, 'zp2': zp2, 'zp3': zp3, 'zp4': zp4,
+            'bzp1': bzp1, 'bzp2': bzp2, 'bzp3': bzp3, 'bzp4': bzp4,
+            'target': target, 'btarget': btarget, 'mzp': mzp
+        })
+    
+    # Если нет результатов, возвращаем исходный df
+    if not results:
+        result_df['pattern18'] = result_df['pattern18'].fillna('none_pattern')
+        result_df['prev_pattern18'] = result_df['prev_pattern18'].fillna('none_pattern')
+        return result_df
+    
+    # Создаем DataFrame из результатов
+    confirmed_data = pd.DataFrame(results).set_index('index')
+    
+    # Заполняем результаты в основной DataFrame
+    # Для каждой колонки из confirmed_data
+    for col in confirmed_data.columns:
+        # Обновляем значения только в точках смены направления
+        result_df.loc[confirmed_data.index, col] = confirmed_data[col]
+    
+    # Форвардное заполнение для всех колонок
+    # Числовые колонки
+    num_cols = ['zp1', 'zp2', 'zp3', 'zp4', 'bzp1', 'bzp2', 'bzp3', 'bzp4', 'target', 'btarget', 'mzp']
+    for col in num_cols:
+        result_df[col] = result_df[col].ffill().astype(float)
+    
+    # Строковые колонки
+    str_cols = ['pattern18', 'prev_pattern18']
+    for col in str_cols:
+        result_df[col] = result_df[col].ffill().fillna('none_pattern')
+    
+    return result_df
+
+def add_stop_loss_p18czd(df,divider=2):
+    """add 'lsl','ssl'"""
+    df = df.copy()
+    df['cur_range'] = (df['zp3'] - df['zp4']).abs()
+
+    # Вычисляем min и max между zp3 и zp4 для каждой строки
+    df['min_zp'] = df[['zp3', 'zp4']].min(axis=1)
+    df['max_zp'] = df[['zp3', 'zp4']].max(axis=1)
+
+    # Вычисляем lsl и ssl
+    df['lsl'] = df['min_zp'] - df['cur_range'] / divider
+    df['ssl'] = df['max_zp'] + df['cur_range'] / divider
+
+    # Удаляем временные колонки (опционально)
+    df = df.drop(columns=['min_zp', 'max_zp'])
+    return df
+
+def add_buffer_dzz(df:pd.DataFrame,period=20):
+    """add 'hbzz','lbzz'"""
+    df['hdz'] = (df['high'] - df['zigzag']).rolling(period).std()
+    df['ldz'] = (df['zigzag'] - df['low']).rolling(period).std()
+    df['hbzz'] =  df['zigzag'] + df['hdz']
+    df['lbzz'] =  df['zigzag'] - df['ldz']
+    return df
+
+def add_mean_dzz_peaks(df: pd.DataFrame, period=2, buffer=0.1):
+    """add 'top_mean','bottom_mean','delta_mean'"""
+    df = df.copy()
+    peaks = df[~pd.isna(df['zigzag_peaks'])].copy()  # Добавляем .copy() здесь
+    
+    # Создаем копии для top и bottom peaks
+    top_peaks = peaks[peaks['zigzag_direction'] == 1].copy()
+    bottom_peaks = peaks[peaks['zigzag_direction'] == -1].copy()
+    
+    # Используем .loc для присвоения значений
+    top_peaks.loc[:, 'top_mean'] = top_peaks['high'].rolling(period).mean()
+    bottom_peaks.loc[:, 'bottom_mean'] = bottom_peaks['low'].rolling(period).mean()
+    
+    # Объединяем результаты обратно
+    df = df.join(top_peaks[['top_mean']], how='left')
+    df = df.join(bottom_peaks[['bottom_mean']], how='left')
+    
+    df['top_mean'] = df['top_mean'].ffill()
+    df['bottom_mean'] = df['bottom_mean'].ffill()
+    df['delta_mean'] = df['top_mean'] - df['bottom_mean']
+    df['buffer_mean'] = df['delta_mean']  * buffer
+    df['top_mean'] = df['top_mean'] - df['buffer_mean']
+    df['bottom_mean'] = df['bottom_mean'] + df['buffer_mean']
+    
+    return df
+
+def add_mean_peaks_wzz260926(df, buffer=0.1):
+    """add 'top_mean','bottom_mean','delta_mean','buffer_mean'
+
+    Векторизованная оконная версия: берём среднее по всем точкам
+    wzp1..wzpN на каждом баре. Тип точки определяется чередованием,
+    начиная с типа первой валидной точки.
+    """
+    df = df.copy()
+    n = len(df)
+
+    # --- 1. автоматически определяем N по колонкам wzpK ---
+    wzp_cols = [c for c in df.columns if c.startswith('wzp') and c[3:].isdigit()]
+    wzp_cols.sort(key=lambda c: int(c[3:]))
+    N = len(wzp_cols)
+
+    if N < 2:
+        df['top_mean']    = np.nan
+        df['bottom_mean'] = np.nan
+        df['delta_mean']  = np.nan
+        df['buffer_mean'] = np.nan
+        return df
+
+    W = np.column_stack([df[c].to_numpy(dtype=float) for c in wzp_cols])
+    M = ~np.isnan(W)
+
+    cols = np.arange(N)
+    rows_all = np.arange(n)
+
+    # --- 2. первые два валидных индекса в каждой строке ---
+    has_any = M.any(axis=1)
+    k0 = np.where(has_any, M.argmax(axis=1), -1)
+
+    M2 = M.copy()
+    safe_k0 = np.clip(k0, 0, N - 1)
+    M2[rows_all, safe_k0] = False
+    has_two = M2.any(axis=1)
+    k1 = np.where(has_two, M2.argmax(axis=1), -1)
+
+    valid_rows = (k0 >= 0) & (k1 >= 0)
+
+    safe_k0 = np.clip(k0, 0, N - 1)
+    safe_k1 = np.clip(k1, 0, N - 1)
+
+    # --- 3. маски чётности относительно k0 ---
+    diff  = cols[None, :] - k0[:, None]
+    ge_k0 = cols[None, :] >= k0[:, None]
+
+    even_mask = ((diff % 2) == 0) & ge_k0 & M & valid_rows[:, None]
+    odd_mask  = ((diff % 2) == 1) & ge_k0 & M & valid_rows[:, None]
+
+    # --- 4. средние без nanmean ---
+    cnt_even = even_mask.sum(axis=1)
+    cnt_odd  = odd_mask.sum(axis=1)
+
+    sum_even = np.where(even_mask, W, 0.0).sum(axis=1)
+    sum_odd  = np.where(odd_mask,  W, 0.0).sum(axis=1)
+
+    mean_even = np.where(cnt_even > 0, sum_even / np.maximum(cnt_even, 1), np.nan)
+    mean_odd  = np.where(cnt_odd  > 0, sum_odd  / np.maximum(cnt_odd,  1), np.nan)
+
+    # --- 5. определяем, кто из них low, кто high ---
+    w_k0 = W[rows_all, safe_k0]
+    w_k1 = W[rows_all, safe_k1]
+    first_is_low = np.where(valid_rows, w_k0 < w_k1, False)
+
+    top_mean    = np.where(first_is_low, mean_odd,  mean_even)
+    bottom_mean = np.where(first_is_low, mean_even, mean_odd)
+
+    top_mean    = np.where(valid_rows, top_mean,    np.nan)
+    bottom_mean = np.where(valid_rows, bottom_mean, np.nan)
+
+    df['top_mean']    = top_mean
+    df['bottom_mean'] = bottom_mean
+
+    # --- 6. ffill + буфер ---
+    df['top_mean']    = df['top_mean'].ffill()
+    df['bottom_mean'] = df['bottom_mean'].ffill()
+
+    df['delta_mean']  = df['top_mean'] - df['bottom_mean']
+    df['buffer_mean'] = df['delta_mean'] * buffer
+    df['top_mean']    = df['top_mean']    - df['buffer_mean']
+    df['bottom_mean'] = df['bottom_mean'] + df['buffer_mean']
+
+    return df
+
+def add_plusdelta_dzz_peaks(df: pd.DataFrame, period=2, buffer=0.1):
+    """add 'top_pd','bottom_pd','delta_pd'"""
+    df = df.copy()
+    peaks = df[~pd.isna(df['zigzag_peaks'])].copy()  # Добавляем .copy() здесь
+    
+    # Создаем копии для top и bottom peaks
+    top_peaks = peaks[peaks['zigzag_direction'] == 1].copy()
+    bottom_peaks = peaks[peaks['zigzag_direction'] == -1].copy()
+    
+    # Используем .loc для присвоения значений
+    top_peaks.loc[:, 'delta'] = top_peaks['high'].diff()
+    bottom_peaks.loc[:, 'delta'] = bottom_peaks['low'].diff()
+    top_peaks.loc[:, 'delta_mean'] = top_peaks['delta'].rolling(period).mean()
+    bottom_peaks.loc[:, 'delta_mean'] = bottom_peaks['delta'].rolling(period).mean()
+    top_peaks.loc[:, 'top_pd'] = top_peaks['high'] + top_peaks['delta_mean']
+    bottom_peaks.loc[:, 'bottom_pd'] = bottom_peaks['low'] + bottom_peaks['delta_mean']
+    # Объединяем результаты обратно
+    df = df.join(top_peaks[['top_pd']], how='left')
+    df = df.join(bottom_peaks[['bottom_pd']], how='left')
+    
+    df['top_pd'] = df['top_pd'].ffill()
+    df['bottom_pd'] = df['bottom_pd'].ffill()
+    df['delta_pd'] = df['top_pd'] - df['bottom_pd']
+    df['buffer_mean'] = df['delta_pd']  * buffer
+    df['top_pd'] = df['top_pd'] - df['buffer_mean']
+    df['bottom_pd'] = df['bottom_pd'] + df['buffer_mean']
+    return df
+
+def add_exp_plusdelta_dzz_peaks(df: pd.DataFrame, period=2, buffer=0.1):
+    """add 'top_pd','bottom_pd','delta_pd'"""
+    df = df.copy()
+    peaks = df[~pd.isna(df['zigzag_peaks'])].copy()  # Добавляем .copy() здесь
+    
+    # Создаем копии для top и bottom peaks
+    top_peaks = peaks[peaks['zigzag_direction'] == 1].copy()
+    bottom_peaks = peaks[peaks['zigzag_direction'] == -1].copy()
+    
+    # Используем .loc для присвоения значений
+    top_peaks.loc[:, 'delta'] = top_peaks['high'].diff()
+    bottom_peaks.loc[:, 'delta'] = bottom_peaks['low'].diff()
+    top_peaks.loc[:, 'delta_mean'] = top_peaks['delta'].ewm(period).mean()
+    bottom_peaks.loc[:, 'delta_mean'] = bottom_peaks['delta'].ewm(period).mean()
+    top_peaks.loc[:, 'top_pd'] = top_peaks['high'] + top_peaks['delta_mean']
+    bottom_peaks.loc[:, 'bottom_pd'] = bottom_peaks['low'] + bottom_peaks['delta_mean']
+    # Объединяем результаты обратно
+    df = df.join(top_peaks[['top_pd']], how='left')
+    df = df.join(bottom_peaks[['bottom_pd']], how='left')
+    
+    df['top_pd'] = df['top_pd'].ffill()
+    df['bottom_pd'] = df['bottom_pd'].ffill()
+    df['delta_pd'] = df['top_pd'] - df['bottom_pd']
+    df['buffer_mean'] = df['delta_pd']  * buffer
+    df['top_pd'] = df['top_pd'] - df['buffer_mean']
+    df['bottom_pd'] = df['bottom_pd'] + df['buffer_mean']
+    return df
+
+def add_plusdelta_peaks_wzz260926(df, buffer=0.1):
+    """add 'top_pd','bottom_pd','delta_pd','buffer_pd'
+
+    Оконная версия add_plusdelta_dzz_peaks под зигзаг wzpN.
+    Без period: rolling mean по всем точкам одного типа, что есть на баре.
+    Тип точки определяется чередованием:
+      если первая < вторая → первая L, дальше H, L, H, ...
+    Уровень = цена последней точки + среднее дельт между соседними
+    точками того же типа.
+    """
+    df = df.copy()
+    n = len(df)
+
+    # --- 1. автоматически определяем N по колонкам wzpK ---
+    wzp_cols = [c for c in df.columns if c.startswith('wzp') and c[3:].isdigit()]
+    wzp_cols.sort(key=lambda c: int(c[3:]))
+    N = len(wzp_cols)
+
+    if N < 2:
+        df['top_pd']    = np.nan
+        df['bottom_pd'] = np.nan
+        df['delta_pd']  = np.nan
+        df['buffer_pd'] = np.nan
+        return df
+
+    W = np.column_stack([df[c].to_numpy(dtype=float) for c in wzp_cols])
+    M = ~np.isnan(W)
+
+    cols     = np.arange(N)
+    rows_all = np.arange(n)
+
+    # --- 2. первые два валидных индекса в каждой строке ---
+    has_any = M.any(axis=1)
+    k0 = np.where(has_any, M.argmax(axis=1), -1)
+
+    M2 = M.copy()
+    safe_k0 = np.clip(k0, 0, N - 1)
+    M2[rows_all, safe_k0] = False
+    has_two = M2.any(axis=1)
+    k1 = np.where(has_two, M2.argmax(axis=1), -1)
+
+    valid_rows = (k0 >= 0) & (k1 >= 0)
+
+    safe_k0 = np.clip(k0, 0, N - 1)
+    safe_k1 = np.clip(k1, 0, N - 1)
+
+    # --- 3. маски чётности относительно k0 ---
+    diff  = cols[None, :] - k0[:, None]
+    ge_k0 = cols[None, :] >= k0[:, None]
+
+    even_mask = ((diff % 2) == 0) & ge_k0 & M & valid_rows[:, None]
+    odd_mask  = ((diff % 2) == 1) & ge_k0 & M & valid_rows[:, None]
+
+    # --- 4. определяем, какой набор — low, какой — high ---
+    w_k0 = W[rows_all, safe_k0]
+    w_k1 = W[rows_all, safe_k1]
+    first_is_low = np.where(valid_rows, w_k0 < w_k1, False)
+
+    low_mask  = np.where(first_is_low[:, None], even_mask, odd_mask)
+    high_mask = np.where(first_is_low[:, None], odd_mask,  even_mask)
+
+    top_pd    = np.full(n, np.nan)
+    bottom_pd = np.full(n, np.nan)
+
+    # --- 5. построчный проход по валидным строкам ---
+    for i in range(n):
+        if not valid_rows[i]:
+            continue
+
+        row = W[i]
+
+        # --- LOW: цены лоев, дельты между соседними, rolling mean по всем ---
+        low_idx = np.flatnonzero(low_mask[i])
+        if low_idx.size >= 2:
+            vals = row[low_idx]
+            deltas = np.diff(vals)                # длины size-1
+            dlm = deltas.mean()                   # среднее по всем дельтам
+            bottom_pd[i] = vals[-1] + dlm
+        elif low_idx.size == 1:
+            # одна точка — дельт нет, уровня нет
+            pass
+
+        # --- HIGH ---
+        high_idx = np.flatnonzero(high_mask[i])
+        if high_idx.size >= 2:
+            vals = row[high_idx]
+            deltas = np.diff(vals)
+            dhm = deltas.mean()
+            top_pd[i] = vals[-1] + dhm
+        elif high_idx.size == 1:
+            pass
+
+    df['top_pd']    = top_pd
+    df['bottom_pd'] = bottom_pd
+
+    # --- 6. ffill + буфер ---
+    df['top_pd']    = df['top_pd'].ffill()
+    df['bottom_pd'] = df['bottom_pd'].ffill()
+
+    df['delta_pd']  = df['top_pd'] - df['bottom_pd']
+    df['buffer_pd'] = df['delta_pd'] * buffer
+    df['top_pd']    = df['top_pd']    - df['buffer_pd']
+    df['bottom_pd'] = df['bottom_pd'] + df['buffer_pd']
+
+    return df
+
+def add_exp_plusdelta_peaks_wzz260926(df, buffer=0.1):
+    """add 'top_pd','bottom_pd','delta_pd','buffer_pd'
+
+    Оконная версия add_exp_plusdelta_dzz_peaks под зигзаг wzpN.
+    Без period: EWM(span=N) по всем точкам одного типа, что есть на баре.
+    Тип точки определяется чередованием:
+      если первая < вторая → первая L, дальше H, L, H, ...
+    Уровень = цена последней точки + EWM(дельт между соседними
+    точками того же типа).
+    """
+    df = df.copy()
+    n = len(df)
+
+    # --- 1. автоматически определяем N по колонкам wzpK ---
+    wzp_cols = [c for c in df.columns if c.startswith('wzp') and c[3:].isdigit()]
+    wzp_cols.sort(key=lambda c: int(c[3:]))
+    N = len(wzp_cols)
+
+    if N < 2:
+        df['top_pd']    = np.nan
+        df['bottom_pd'] = np.nan
+        df['delta_pd']  = np.nan
+        df['buffer_pd'] = np.nan
+        return df
+
+    W = np.column_stack([df[c].to_numpy(dtype=float) for c in wzp_cols])
+    M = ~np.isnan(W)
+
+    cols     = np.arange(N)
+    rows_all = np.arange(n)
+
+    # --- 2. первые два валидных индекса в каждой строке ---
+    has_any = M.any(axis=1)
+    k0 = np.where(has_any, M.argmax(axis=1), -1)
+
+    M2 = M.copy()
+    safe_k0 = np.clip(k0, 0, N - 1)
+    M2[rows_all, safe_k0] = False
+    has_two = M2.any(axis=1)
+    k1 = np.where(has_two, M2.argmax(axis=1), -1)
+
+    valid_rows = (k0 >= 0) & (k1 >= 0)
+
+    safe_k0 = np.clip(k0, 0, N - 1)
+    safe_k1 = np.clip(k1, 0, N - 1)
+
+    # --- 3. маски чётности относительно k0 ---
+    diff  = cols[None, :] - k0[:, None]
+    ge_k0 = cols[None, :] >= k0[:, None]
+
+    even_mask = ((diff % 2) == 0) & ge_k0 & M & valid_rows[:, None]
+    odd_mask  = ((diff % 2) == 1) & ge_k0 & M & valid_rows[:, None]
+
+    # --- 4. определяем, какой набор — low, какой — high ---
+    w_k0 = W[rows_all, safe_k0]
+    w_k1 = W[rows_all, safe_k1]
+    first_is_low = np.where(valid_rows, w_k0 < w_k1, False)
+
+    low_mask  = np.where(first_is_low[:, None], even_mask, odd_mask)
+    high_mask = np.where(first_is_low[:, None], odd_mask,  even_mask)
+
+    # --- 5. alpha для ewm(span=N), adjust=True ---
+    if N is None or N < 1:
+        alpha = 1.0
+    else:
+        alpha = 2.0 / (N + 1.0)
+    one_m_alpha = 1.0 - alpha
+
+    top_pd    = np.full(n, np.nan)
+    bottom_pd = np.full(n, np.nan)
+
+    # --- 6. построчный проход по валидным строкам (EWM рекуррентная) ---
+    for i in range(n):
+        if not valid_rows[i]:
+            continue
+
+        row = W[i]
+
+        # --- LOW ---
+        low_idx = np.flatnonzero(low_mask[i])
+        if low_idx.size > 0:
+            num = 0.0
+            den = 0.0
+            prev = np.nan
+            ewm_val = np.nan
+            last_val = np.nan
+            for k in low_idx:
+                v = row[k]
+                if not np.isnan(prev):
+                    delta = v - prev
+                    num = delta + one_m_alpha * num
+                    den = 1.0 + one_m_alpha * den
+                    ewm_val = num / den
+                    last_val = v + ewm_val
+                prev = v
+            if not np.isnan(last_val):
+                bottom_pd[i] = last_val
+
+        # --- HIGH ---
+        high_idx = np.flatnonzero(high_mask[i])
+        if high_idx.size > 0:
+            num = 0.0
+            den = 0.0
+            prev = np.nan
+            ewm_val = np.nan
+            last_val = np.nan
+            for k in high_idx:
+                v = row[k]
+                if not np.isnan(prev):
+                    delta = v - prev
+                    num = delta + one_m_alpha * num
+                    den = 1.0 + one_m_alpha * den
+                    ewm_val = num / den
+                    last_val = v + ewm_val
+                prev = v
+            if not np.isnan(last_val):
+                top_pd[i] = last_val
+
+    df['top_pd']    = top_pd
+    df['bottom_pd'] = bottom_pd
+
+    # --- 7. ffill + буфер ---
+    df['top_pd']    = df['top_pd'].ffill()
+    df['bottom_pd'] = df['bottom_pd'].ffill()
+
+    df['delta_pd']  = df['top_pd'] - df['bottom_pd']
+    df['buffer_pd'] = df['delta_pd'] * buffer
+    df['top_pd']    = df['top_pd']    - df['buffer_pd']
+    df['bottom_pd'] = df['bottom_pd'] + df['buffer_pd']
+
+    return df
+# проверить
+def add_van_zigzag(df, period=7):
+    """add swing_high  swing_low  zigzag  zigzag_high  zigzag_low  zigzag_line"""
+    # Создаем копию DataFrame и сбрасываем индекс
+    df = df.copy(deep=True).reset_index(drop=True)
+    n = len(df)
+    
+    # Предварительный расчет экстремумов
+    df['swing_high'] = df['high'].rolling(window=period+1, min_periods=1).max()
+    df['swing_low'] = df['low'].rolling(window=period+1, min_periods=1).min()
+    
+    # Инициализация массивов
+    zigzag = np.full(n, np.nan)
+    zigzag_high = np.full(n, np.nan)
+    zigzag_low = np.full(n, np.nan)
+    
+    # Получаем сырые массивы значений
+    high_values = df['high'].values
+    low_values = df['low'].values
+    swing_high_values = df['swing_high'].values
+    swing_low_values = df['swing_low'].values
+    
+    # Основные переменные состояния
+    trend_dir = 0
+    last_swing_index = -1
+    last_swing_price = np.nan
+    
+    for idx in range(2*period, n):
+        high = high_values[idx]
+        low = low_values[idx]
+        
+        # Проверка экстремумов с учетом погрешности
+        is_swing_high = np.isclose(high, swing_high_values[idx], atol=1e-5)
+        is_swing_low = np.isclose(low, swing_low_values[idx], atol=1e-5)
+
+        if not is_swing_high and not is_swing_low:
+            continue
+
+        # Логика обновления зигзага
+        if trend_dir == 1 and is_swing_high and high >= last_swing_price:
+            _update_zigzag(zigzag, zigzag_high, idx, high, last_swing_index)
+            last_swing_index, last_swing_price = idx, high
+            
+        elif trend_dir == -1 and is_swing_low and low <= last_swing_price:
+            _update_zigzag(zigzag, zigzag_low, idx, low, last_swing_index)
+            last_swing_index, last_swing_price = idx, low
+            
+        elif trend_dir <= 0 and is_swing_high:
+            trend_dir = 1
+            zigzag[idx] = zigzag_high[idx] = high
+            last_swing_index, last_swing_price = idx, high
+            
+        elif trend_dir >= 0 and is_swing_low:
+            trend_dir = -1
+            zigzag[idx] = zigzag_low[idx] = low
+            last_swing_index, last_swing_price = idx, low
+
+    # Добавляем результаты в DataFrame
+    df['zigzag'] = zigzag
+    df['zigzag_high'] = zigzag_high
+    df['zigzag_low'] = zigzag_low
+    df['zigzag_line'] = _interpolate_zigzag(zigzag)
+    
+    # Удаление начальных/конечных NaN
+    return _trim_nan(df)
+
+# Вспомогательные функции
+def _update_zigzag(zigzag, target_arr, idx, value, last_idx):
+    if last_idx != -1:
+        zigzag[last_idx] = np.nan
+        target_arr[last_idx] = np.nan
+    zigzag[idx] = target_arr[idx] = value
+
+def _interpolate_zigzag(zigzag):
+    line = np.full_like(zigzag, np.nan)
+    points = np.where(~np.isnan(zigzag))[0]
+    
+    for i in range(len(points)-1):
+        start, end = points[i], points[i+1]
+        line[start:end+1] = np.linspace(zigzag[start], zigzag[end], end-start+1)
+    
+    return line
+
+def _trim_nan(df):
+    first_valid = df['zigzag'].first_valid_index()
+    last_valid = df['zigzag'].last_valid_index()
+    
+    if first_valid is not None and last_valid is not None:
+        cols = ['zigzag', 'zigzag_line', 'zigzag_high', 'zigzag_low']
+        df.loc[:first_valid, cols] = np.nan
+        df.loc[last_valid+1:, cols] = np.nan
+    
+    return df
+
+def add_shift_zz_peaks(df, shift=1, add_lust_fake_peak=True):
+    """
+    add 'zp_s' , 'zp_istop'
+    'zp_s' - сдвинутая точка зигзага на shift
+    'zp_istop' - точка вверху? (True/False)
+    """
+    if add_lust_fake_peak:
+        last_idx = df.index[-1]
+
+        # Проверяем направление и присваиваем соответствующее значение
+        if df.loc[last_idx, 'zigzag_direction'] == 1:
+            df.at[last_idx, 'zigzag_peaks'] = df.loc[last_idx, 'high']
+        else:
+            df.at[last_idx, 'zigzag_peaks'] = df.loc[last_idx, 'low']
+    # Создаем маску для строк, где zigzag_peaks не NaN
+    mask = ~pd.isna(df['zigzag_peaks'])
+    
+    # Создаем новый DataFrame только с нужными строками (явная копия)
+    zz = df.loc[mask].copy()
+    
+    # Добавляем колонки в копию
+    zz['zp_s'] = zz['zigzag_peaks'].shift(shift)
+    zz['zp_istop'] = zz['zigzag_direction'] < 0
+    
+    # Инициализируем колонки в исходном df с правильными типами
+    df['zp_s'] = np.nan  # float64
+    df['zp_istop'] = pd.NA  # или False, или pd.Series(dtype='boolean')
+    
+    # Записываем значения из zz обратно в df с явным приведением типа
+    df.loc[zz.index, 'zp_s'] = zz['zp_s'].astype(float)
+    df.loc[zz.index, 'zp_istop'] = zz['zp_istop'].astype('boolean')
+    
+    return df
+
+def get_rolling_extremes_indices(series: pd.Series, period: int, extremum: str):
+    """Получает индексы экстремумов для скользящего окна"""
+    indices = []
+    for i in range(len(series)):
+        start = max(0, i - period + 1)
+        window = series.iloc[start:i+1]
+        if len(window) == period:
+            if extremum == 'max':
+                indices.append(window.idxmax())
+            else:  # 'min'
+                indices.append(window.idxmin())
+        else:
+            indices.append(pd.NaT)
+    return indices
+
+
+# Прикольно, но как будто, можно лучше сделать. В любом случае с этим нужно будет что-то сделать
+def add_window_zigzag190826(df: pd.DataFrame, period=55):
+    cols = ['wzp1', 'wzp2', 'wzp3', 'wzp4', 
+            'idx_wzp1', 'idx_wzp2', 'idx_wzp3', 'idx_wzp4',
+            'dir_wzp1', 'dir_wzp2', 'dir_wzp3']
+    df[cols] = np.nan
+    
+    # Получаем rolling экстремумы
+    df['max_value'] = df['high'].rolling(period).max()
+    df['min_value'] = df['low'].rolling(period).min()
+    df['max_idx'] = get_rolling_extremes_indices(df['high'], period, 'max')
+    df['min_idx'] = get_rolling_extremes_indices(df['low'], period, 'min')
+    
+    # Основные случаи - векторизация
+    mask_max_after_min = df['max_idx'] > df['min_idx']
+    mask_min_after_max = df['max_idx'] < df['min_idx']
+    
+    # Заполняем основные случаи одной операцией
+    df.loc[mask_max_after_min, ['wzp4', 'wzp3', 'wzp2']] = df.loc[mask_max_after_min, ['low', 'max_value', 'min_value']].values
+    df.loc[mask_max_after_min, ['idx_wzp4', 'idx_wzp3', 'idx_wzp2']] = np.column_stack([
+        df.index[mask_max_after_min],
+        df.loc[mask_max_after_min, 'max_idx'],
+        df.loc[mask_max_after_min, 'min_idx']
+    ])
+    
+    df.loc[mask_min_after_max, ['wzp4', 'wzp3', 'wzp2']] = df.loc[mask_min_after_max, ['high', 'min_value', 'max_value']].values
+    df.loc[mask_min_after_max, ['idx_wzp4', 'idx_wzp3', 'idx_wzp2']] = np.column_stack([
+        df.index[mask_min_after_max],
+        df.loc[mask_min_after_max, 'min_idx'],
+        df.loc[mask_min_after_max, 'max_idx']
+    ])
+    
+    # Equal cases - минимизируем обращения к df
+    mask_equal = df['max_idx'] == df['min_idx']
+    equal_indices = df.index[mask_equal]
+    
+    # Подготовка данных для equal cases
+    for idx in equal_indices:
+        pos = df.index.get_loc(idx)
+        if pos < period:
+            continue
+            
+        max_idx_val = df.loc[idx, 'max_idx']
+        close_ext = df.loc[max_idx_val, 'close']
+        nearest_long = df.loc[idx, 'max_value'] - close_ext > close_ext - df.loc[idx, 'min_value']
+        
+        if nearest_long:
+            df.loc[idx, ['wzp4', 'wzp3', 'wzp2']] = [df.loc[idx, 'low'], df.loc[idx, 'max_value'], df.loc[idx, 'min_value']]
+            df.loc[idx, ['idx_wzp4', 'idx_wzp3', 'idx_wzp2']] = [idx, max_idx_val, df.loc[idx, 'min_idx']]
+        else:
+            df.loc[idx, ['wzp4', 'wzp3', 'wzp2']] = [df.loc[idx, 'high'], df.loc[idx, 'min_value'], df.loc[idx, 'max_value']]
+            df.loc[idx, ['idx_wzp4', 'idx_wzp3', 'idx_wzp2']] = [idx, df.loc[idx, 'min_idx'], max_idx_val]
+    
+    # wzp1 - используем предварительно созданные массивы для скорости
+    wzp1_values = np.full(len(df), np.nan)
+    idx_wzp1_values = np.full(len(df), pd.NaT, dtype='object')
+    
+    for i in range(period, len(df)):
+        if pd.isna(df.iloc[i]['wzp2']):
+            continue
+            
+        wzp2_is_low = df.iloc[i]['wzp2'] == df.iloc[i]['min_value']
+        end_idx = df.iloc[i]['idx_wzp2']
+        start_idx = df.index[i - period]
+        
+        if wzp2_is_low:
+            mask = (df.index >= start_idx) & (df.index <= end_idx)
+            if mask.any():
+                wzp1_values[i] = df.loc[mask, 'high'].max()
+                idx_wzp1_values[i] = df.loc[mask, 'high'].idxmax()
+        else:
+            mask = (df.index >= start_idx) & (df.index <= end_idx)
+            if mask.any():
+                wzp1_values[i] = df.loc[mask, 'low'].min()
+                idx_wzp1_values[i] = df.loc[mask, 'low'].idxmin()
+    
+    df['wzp1'] = wzp1_values
+    df['idx_wzp1'] = idx_wzp1_values
+    
+    return df
+
+
+"""
+    Идеи для зигзагов:
+    1. Какая-нибудь функция синусоиды и по ней строить зигзаг
+    2. Попытаться строить по скользящей стредней
+    3. Диагонали в канеле дончана
+"""
+# 21092026
+# 21 оптимизированная
+
+# ---------- базовые экстремумы ----------
+
+def find_extremum_zzw210926(h, l, from_pos, to_pos, kind):
+    """Первый экстремум в [from_pos, to_pos). kind: 'H' или 'L'."""
+    if to_pos - from_pos < 1:
+        return None
+    if kind == 'H':
+        sub = h[from_pos:to_pos]
+        k = int(np.argmax(sub))
+        return (from_pos + k, sub[k], 'H')
+    else:
+        sub = l[from_pos:to_pos]
+        k = int(np.argmin(sub))
+        return (from_pos + k, sub[k], 'L')
+
+
+def find_extremum_last_zzw210926(h, l, from_pos, to_pos, kind):
+    """Последний экстремум в [from_pos, to_pos). kind: 'H' или 'L'."""
+    if to_pos - from_pos < 1:
+        return None
+    if kind == 'H':
+        sub = h[from_pos:to_pos]
+        m = sub.max()
+        k = int(np.flatnonzero(sub == m)[-1])
+        return (from_pos + k, sub[k], 'H')
+    else:
+        sub = l[from_pos:to_pos]
+        m = sub.min()
+        k = int(np.flatnonzero(sub == m)[-1])
+        return (from_pos + k, sub[k], 'L')
+
+
+# ---------- зоны ----------
+
+def pick_zone_zzw210926(S_left, S_mid, S_right, tol_frac):
+    max_size = max(S_left, S_mid, S_right)
+    if max_size <= 0:
+        return 'mid'
+    threshold = max_size - tol_frac * max_size
+    # порядок важен: right -> mid -> left
+    if S_right >= threshold:
+        return 'right'
+    if S_mid >= threshold:
+        return 'mid'
+    return 'left'
+
+
+# ---------- mid-логика: черновые + уточнение ----------
+
+def mid_extras_zzw210926(h, l, L_pos, L_type, R_pos, R_type):
+    """
+    Логика mid с двумя проходами:
+      1. th2_temp — экстремум в левой половине [L, mid(L,R)]
+      2. tl3_temp — экстремум в правой половине [th2_temp, R]
+      3. h2_real  — последний экстремум в [L+1, tl3_temp)
+      4. l3_real  — последний экстремум в [h2_real+1, R)
+
+    Возвращает 2 уточнённые точки (h2_real, l3_real).
+    Чередование типов нерушимо: L → p1(opp L) → p2(как L) → R.
+    Конвенция границ: левая включается, правая — нет.
+    """
+    p1_type = 'L' if L_type == 'H' else 'H'
+    p2_type = L_type
+
+    # --- черновая th2 ---
+    mid1 = (L_pos + R_pos) // 2
+    th2 = find_extremum_zzw210926(h, l, L_pos + 1, mid1 + 1, p1_type)
+    if th2 is None:
+        th2 = find_extremum_zzw210926(h, l, L_pos + 1, R_pos, p1_type)
+    if th2 is None:
+        return []
+
+    # --- черновая tl3 ---
+    mid2 = (th2[0] + R_pos) // 2
+    tl3 = find_extremum_zzw210926(h, l, th2[0] + 1, mid2 + 1, p2_type)
+    if tl3 is None:
+        tl3 = find_extremum_zzw210926(h, l, th2[0] + 1, R_pos, p2_type)
+    if tl3 is None:
+        return [th2]
+
+    # --- уточнение h2_real: последний экстремум в [L+1, tl3) ---
+    h2_real = find_extremum_last_zzw210926(h, l, L_pos + 1, tl3[0], p1_type)
+    if h2_real is None:
+        h2_real = th2
+
+    # --- уточнение l3_real: последний экстремум в [h2_real+1, R) ---
+    l3_real = find_extremum_last_zzw210926(h, l, h2_real[0] + 1, R_pos, p2_type)
+    if l3_real is None:
+        l3_real = tl3
+
+    return [h2_real, l3_real]
+
+
+# ---------- helpers для Шагов 5/5.5/6 ----------
+
+def _build_alternating_sequence(all_points, h, l):
+    """Чередование с дозаполнением между соседями одного типа."""
+    validated = [all_points[0]]
+    for p in all_points[1:]:
+        prev = validated[-1]
+        if p[2] == prev[2]:
+            opposite = 'L' if p[2] == 'H' else 'H'
+            extra = find_extremum_zzw210926(h, l, prev[0] + 1, p[0], opposite)
+            if extra is not None:
+                validated.append(extra)
+            validated.append(p)
+        else:
+            validated.append(p)
+    return validated
+
+
+def _dedupe_points(pts):
+    seen = set()
+    unique = []
+    for p in pts:
+        key = (p[0], p[2])
+        if key not in seen:
+            unique.append(p)
+            seen.add(key)
+    return unique
+
+
+def _trim_to_four(validated, L_pos, R_pos, op_positions):
+    """Обрезка до 4 точек с приоритетом опорных L_pos/R_pos."""
+    if len(validated) > 4:
+        validated = _dedupe_points(validated)
+
+    if len(validated) > 4:
+        final = validated[:4]
+        positions_in_final = {p[0] for p in final}
+        for op_pos in (L_pos, R_pos):
+            if op_pos not in positions_in_final:
+                op_point = next(p for p in validated if p[0] == op_pos)
+                non_op_indices = [idx for idx, p in enumerate(final)
+                                  if p[0] != L_pos and p[0] != R_pos]
+                if non_op_indices:
+                    final[non_op_indices[-1]] = op_point
+        final.sort(key=lambda p: (p[0], p[0] not in op_positions))
+        validated = final
+
+    return validated
+
+
+def _has_strict_alternation(pts):
+    for k in range(len(pts) - 1):
+        if pts[k][2] == pts[k + 1][2]:
+            return False
+    return True
+
+
+# ---------- основной пайплайн ----------
+# Слишком сильный прыгает туда-сюда, надо менять по хорошему. Скорее всего проблема, в том, что мы ищем точки то в одном месте, то в другом. Но принцип определения экстремумом в середине, можно перенести на более глубокие версии
+def add_zigzag_window_210926(df, period=55, tol_frac=0.10):
+    
+    n = len(df)
+    high = df['high'].to_numpy(dtype=float)
+    low = df['low'].to_numpy(dtype=float)
+    df_index = df.index.to_numpy()
+
+    # 2D-массивы: 4 точки × n баров
+    wzp_prices = np.full((4, n), np.nan)
+    wzp_idx = np.full((4, n), np.nan)
+
+    for i in range(period - 1, n):
+        start = i - period + 1
+
+        h = high[start:start + period]
+        l = low[start:start + period]
+
+        # --- Шаг 1: опорные точки ---
+        pos_max = int(np.argmax(h))
+        pos_min = int(np.argmin(l))
+
+        if pos_max == pos_min:
+            h_masked = h.copy()
+            l_masked = l.copy()
+            h_masked[pos_max] = -np.inf
+            l_masked[pos_min] = np.inf
+            alt_max = int(np.argmax(h_masked))
+            alt_min = int(np.argmin(l_masked))
+            if h[pos_max] - h[alt_max] <= l[alt_min] - l[pos_min]:
+                pos_max = alt_max
+            else:
+                pos_min = alt_min
+
+        if pos_max < pos_min:
+            L_pos, L_type = pos_max, 'H'
+            R_pos, R_type = pos_min, 'L'
+        else:
+            L_pos, L_type = pos_min, 'L'
+            R_pos, R_type = pos_max, 'H'
+
+        L_price = h[L_pos] if L_type == 'H' else l[L_pos]
+        R_price = h[R_pos] if R_type == 'H' else l[R_pos]
+
+        # --- Шаг 2: зоны ---
+        S_left = L_pos
+        S_mid = R_pos - L_pos - 1
+        S_right = period - 1 - R_pos
+
+        chosen = pick_zone_zzw210926(S_left, S_mid, S_right, tol_frac)
+
+        # --- Шаг 3: 2 дополнительные точки ---
+        extras = []
+
+        if chosen == 'left':
+            t1 = 'L' if L_type == 'H' else 'H'
+            t2 = L_type
+            p1 = find_extremum_last_zzw210926(h, l, 0, L_pos, t1)
+            if p1 is not None:
+                extras.append(p1)
+                p2 = find_extremum_last_zzw210926(h, l, 0, p1[0], t2)
+                if p2 is not None:
+                    extras.append(p2)
+
+        elif chosen == 'right':
+            t1 = 'L' if R_type == 'H' else 'H'
+            t2 = R_type
+            p1 = find_extremum_zzw210926(h, l, R_pos + 1, period, t1)
+            if p1 is not None:
+                extras.append(p1)
+                p2 = find_extremum_zzw210926(h, l, p1[0], period, t2)
+                if p2 is not None:
+                    extras.append(p2)
+
+        else:  # mid
+            extras = mid_extras_zzw210926(h, l, L_pos, L_type, R_pos, R_type)
+
+        # --- Шаг 4: сборка и сортировка ---
+        op_positions = (L_pos, R_pos)
+        all_points = [(L_pos, L_price, L_type), (R_pos, R_price, R_type)] + extras
+        all_points.sort(key=lambda p: (p[0], 0 if p[0] in op_positions else 1))
+
+        # --- Шаг 5 + 5.5 ---
+        validated = _build_alternating_sequence(all_points, h, l)
+        validated = _trim_to_four(validated, L_pos, R_pos, op_positions)
+
+        # --- Шаг 6: fallback на mid-логику ---
+        if len(validated) < 4 or not _has_strict_alternation(validated):
+            extras_mid = mid_extras_zzw210926(h, l, L_pos, L_type, R_pos, R_type)
+            all_points_mid = [(L_pos, L_price, L_type),
+                              (R_pos, R_price, R_type)] + extras_mid
+            all_points_mid.sort(key=lambda p: (p[0], 0 if p[0] in op_positions else 1))
+
+            validated = _build_alternating_sequence(all_points_mid, h, l)
+            validated = _trim_to_four(validated, L_pos, R_pos, op_positions)
+
+        # --- Шаг 6.5: крайний fallback ---
+        while len(validated) < 4:
+            last = validated[-1]
+            if last[2] == 'H':
+                validated.append((last[0], l[last[0]], 'L'))
+            else:
+                validated.append((last[0], h[last[0]], 'H'))
+
+        points = validated[:4]
+
+        # --- Шаг 7: индексы с разрешением коллизий ---
+        raw_idx = [p[0] for p in points]
+        final_idx = raw_idx[:]
+        changed = True
+        it = 0
+        while changed and it < 100:
+            changed = False
+            it += 1
+            for k in range(len(final_idx) - 1):
+                if final_idx[k] >= final_idx[k + 1]:
+                    if final_idx[k] - 1 >= 0:
+                        final_idx[k] -= 1
+                        changed = True
+                    elif final_idx[k + 1] + 1 < period:
+                        final_idx[k + 1] += 1
+                        changed = True
+
+        for k in range(4):
+            wzp_prices[k, i] = points[k][1]
+            wzp_idx[k, i] = df_index[start + final_idx[k]]
+
+    for k in range(4):
+        df[f'wzp{k+1}'] = wzp_prices[k]
+        df[f'idx_wzp{k+1}'] = wzp_idx[k]
+
+    return df
+
+
+def add_pattern18_zzw_210926(
+    df: pd.DataFrame,
+    threshold: float = 0.2,
+    add_codes: bool = False,
+) -> pd.DataFrame:
+    """
+    Добавляет pattern18 на основе уже посчитанных wzp1..wzp4.
+    Паттерн определяется на каждом баре (по своему окну).
+
+    Параметры:
+        threshold  — граница big/small (1 ± threshold).
+        add_codes  — если True, добавит pattern18_code (int) для ML/скорости.
+    """
+    df = df.copy()
+
+    zp1 = df['wzp1'].to_numpy(dtype=float)
+    zp2 = df['wzp2'].to_numpy(dtype=float)
+    zp3 = df['wzp3'].to_numpy(dtype=float)
+    zp4 = df['wzp4'].to_numpy(dtype=float)
+
+    n = len(df)
+    patterns = np.full(n, 'none_pattern', dtype=object)
+
+    p1_2 = zp1 - zp2
+    p2_3 = zp2 - zp3
+    p3_4 = zp3 - zp4
+
+    valid = (
+        ~np.isnan(zp1) & ~np.isnan(zp2) & ~np.isnan(zp3) & ~np.isnan(zp4)
+        & (p2_3 != 0) & (p3_4 != 0)
+    )
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r12_23 = np.abs(p1_2 / p2_3)
+        r23_34 = np.abs(p2_3 / p3_4)
+
+    big = 1 + threshold
+    small = 1 - threshold
+    p1_2_pos = p1_2 > 0
+
+    # (имя_условия, маска)
+    conds = [
+        ((r12_23 > big) & (r23_34 > big),                          'weak'),
+        ((r12_23 > big) & (r23_34 < small),                        'r12big_r23small'),
+        ((r12_23 > big) & (r23_34 >= small) & (r23_34 <= big),     'r12big_r23mid'),
+        ((r12_23 < small) & (r23_34 > big),                        'r12small_r23big'),
+        ((r12_23 < small) & (r23_34 < small),                      'r12small_r23small'),
+        ((r12_23 < small) & (r23_34 >= small) & (r23_34 <= big),   'r12small_r23mid'),
+        ((r12_23 >= small) & (r12_23 <= big) & (r23_34 > big),     'r12mid_r23big'),
+        ((r12_23 >= small) & (r12_23 <= big) & (r23_34 < small),   'r12mid_r23small'),
+        ((r12_23 >= small) & (r12_23 <= big) & (r23_34 >= small) & (r23_34 <= big), 'both_mid'),
+    ]
+
+    # Таблица соответствия: (условие, p1_2_pos) -> паттерн
+    table = {
+        ('weak',                True):  'weak_short',
+        ('weak',                False): 'weak_long',
+        ('r12big_r23small',     True):  'bui',
+        ('r12big_r23small',     False): 'joc',
+        ('r12big_r23mid',       True):  'double_bottom',
+        ('r12big_r23mid',       False): 'double_top',
+        ('r12small_r23big',     True):  'btc',
+        ('r12small_r23big',     False): 'bti',
+        ('r12small_r23small',   True):  'sow',
+        ('r12small_r23small',   False): 'sos',
+        ('r12small_r23mid',     True):  'upthrust',
+        ('r12small_r23mid',     False): 'spring',
+        ('r12mid_r23big',       True):  'narrowing_up',
+        ('r12mid_r23big',       False): 'narrowing_down',
+        ('r12mid_r23small',     True):  'bui',
+        ('r12mid_r23small',     False): 'joc',
+        ('both_mid',            True):  'bottom_range',
+        ('both_mid',            False): 'top_range',
+    }
+
+    assigned = np.zeros(n, dtype=bool)
+    for mask, name in conds:
+        m = mask & valid & ~assigned
+        if not m.any():
+            continue
+        idx = np.flatnonzero(m)
+        pos_sel = p1_2_pos[idx]
+        vals = np.array(
+            [table[(name, bool(p))] for p in pos_sel],
+            dtype=object,
+        )
+        patterns[idx] = vals
+        assigned |= m
+
+    df['pattern18'] = patterns
+
+    if add_codes:
+        # детерминированный код для ML: алфавитный порядок имён
+        codes = sorted(set(patterns.tolist()))
+        mapping = {name: i for i, name in enumerate(codes)}
+        df['pattern18_code'] = np.array(
+            [mapping[p] for p in patterns], dtype=np.int16
+        )
+
+    return df
+
+def add_zzw_levels(df: pd.DataFrame, buffer_percent: float = 0.1) -> pd.DataFrame:
+    """
+    Добавляет bzp1..bzp4, target, btarget, mzp на основе wzp1..wzp4.
+    Вызывать отдельно — только если нужны уровни.
+    """
+    df = df.copy()
+
+    zp1 = df['wzp1'].to_numpy(dtype=float)
+    zp2 = df['wzp2'].to_numpy(dtype=float)
+    zp3 = df['wzp3'].to_numpy(dtype=float)
+    zp4 = df['wzp4'].to_numpy(dtype=float)
+
+    p1_2 = zp1 - zp2
+    p2_3 = zp2 - zp3
+    p3_4 = zp3 - zp4
+
+    df['bzp1'] = zp1 - np.sign(p2_3) * np.abs(p2_3) * buffer_percent
+    df['bzp2'] = zp2 + np.sign(p2_3) * np.abs(p2_3) * buffer_percent
+    df['bzp3'] = zp3 - np.sign(p3_4) * np.abs(p3_4) * buffer_percent
+    df['bzp4'] = zp4 + np.sign(p3_4) * np.abs(p3_4) * buffer_percent
+
+    df['target']  = zp4 - p2_3
+    df['btarget'] = zp4 - p2_3 * (1 - buffer_percent / 2)
+    df['mzp']     = (zp3 + zp4) / 2
+
+    return df
+
+def add_stop_loss_p18zzw(df, divider=2):
+    """
+    Добавляет 'lsl' и 'ssl' на основе последних двух точек зигзага (wzp3, wzp4).
+
+    cur_range = |wzp3 - wzp4|
+    lsl       = min(wzp3, wzp4) - cur_range / divider
+    ssl       = max(wzp3, wzp4) + cur_range / divider
+
+    Параметры:
+        df      — DataFrame с колонками wzp3, wzp4
+        divider — делитель диапазона (по умолчанию 2)
+    """
+    df = df.copy()
+
+    zp3 = df['wzp3']
+    zp4 = df['wzp4']
+
+    cur_range = (zp3 - zp4).abs()
+
+    min_zp = pd.concat([zp3, zp4], axis=1).min(axis=1)
+    max_zp = pd.concat([zp3, zp4], axis=1).max(axis=1)
+
+    df['cur_range'] = cur_range
+    df['lsl'] = min_zp + cur_range / divider
+    df['ssl'] = max_zp - cur_range / divider
+
+    return df
+
+def _get_wzp_numbers(df: pd.DataFrame) -> list[int]:
+    """Возвращает отсортированный список номеров N, для которых есть колонка wzpN."""
+    ns = []
+    for col in df.columns:
+        m = re.fullmatch(r'wzp(\d+)', col)
+        if m:
+            ns.append(int(m.group(1)))
+    return sorted(ns)
+
+
+def _last_wzp_cols(df: pd.DataFrame, count: int) -> list[str]:
+    """
+    Возвращает список имён последних `count` колонок wzpN
+    в порядке возрастания N: ['wzp5', 'wzp6', 'wzp7', 'wzp8'] для count=4 и maxN=8.
+    """
+    ns = _get_wzp_numbers(df)
+    if len(ns) < count:
+        raise ValueError(f"В df найдено только {len(ns)} колонок wzpN, нужно минимум {count}")
+    last_ns = ns[-count:]
+    return [f'wzp{n}' for n in last_ns]
+
+
+def _last_idx_wzp_cols(df: pd.DataFrame, count: int) -> list[str]:
+    """Аналогично для idx_wzpN."""
+    ns = []
+    for col in df.columns:
+        m = re.fullmatch(r'idx_wzp(\d+)', col)
+        if m:
+            ns.append(int(m.group(1)))
+    ns = sorted(ns)
+    if len(ns) < count:
+        raise ValueError(f"В df найдено только {len(ns)} колонок idx_wzpN, нужно минимум {count}")
+    return [f'idx_wzp{n}' for n in ns[-count:]]
+
+def add_pattern18_zzw_260926(
+    df: pd.DataFrame,
+    threshold: float = 0.2,
+    add_codes: bool = False,
+) -> pd.DataFrame:
+    """
+    Добавляет pattern18 на основе 4 последних wzp.
+    Если максимальный wzp = 8, берутся wzp5, wzp6, wzp7, wzp8.
+    """
+
+    cols = _last_wzp_cols(df, 4)
+    zp1, zp2, zp3, zp4 = (df[c].to_numpy(dtype=float) for c in cols)
+
+    n = len(df)
+    patterns = np.full(n, 'none_pattern', dtype=object)
+
+    p1_2 = zp1 - zp2
+    p2_3 = zp2 - zp3
+    p3_4 = zp3 - zp4
+
+    valid = (
+        ~np.isnan(zp1) & ~np.isnan(zp2) & ~np.isnan(zp3) & ~np.isnan(zp4)
+        & (p2_3 != 0) & (p3_4 != 0)
+    )
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r12_23 = np.abs(p1_2 / p2_3)
+        r23_34 = np.abs(p2_3 / p3_4)
+
+    big = 1 + threshold
+    small = 1 - threshold
+    p1_2_pos = p1_2 > 0
+
+    conds = [
+        ((r12_23 > big) & (r23_34 > big),                          'weak'),
+        ((r12_23 > big) & (r23_34 < small),                        'r12big_r23small'),
+        ((r12_23 > big) & (r23_34 >= small) & (r23_34 <= big),     'r12big_r23mid'),
+        ((r12_23 < small) & (r23_34 > big),                        'r12small_r23big'),
+        ((r12_23 < small) & (r23_34 < small),                      'r12small_r23small'),
+        ((r12_23 < small) & (r23_34 >= small) & (r23_34 <= big),   'r12small_r23mid'),
+        ((r12_23 >= small) & (r12_23 <= big) & (r23_34 > big),     'r12mid_r23big'),
+        ((r12_23 >= small) & (r12_23 <= big) & (r23_34 < small),   'r12mid_r23small'),
+        ((r12_23 >= small) & (r12_23 <= big) & (r23_34 >= small) & (r23_34 <= big), 'both_mid'),
+    ]
+
+    table = {
+        ('weak',                True):  'weak_short',
+        ('weak',                False): 'weak_long',
+        ('r12big_r23small',     True):  'bui',
+        ('r12big_r23small',     False): 'joc',
+        ('r12big_r23mid',       True):  'double_bottom',
+        ('r12big_r23mid',       False): 'double_top',
+        ('r12small_r23big',     True):  'btc',
+        ('r12small_r23big',     False): 'bti',
+        ('r12small_r23small',   True):  'sow',
+        ('r12small_r23small',   False): 'sos',
+        ('r12small_r23mid',     True):  'upthrust',
+        ('r12small_r23mid',     False): 'spring',
+        ('r12mid_r23big',       True):  'narrowing_up',
+        ('r12mid_r23big',       False): 'narrowing_down',
+        ('r12mid_r23small',     True):  'bui',
+        ('r12mid_r23small',     False): 'joc',
+        ('both_mid',            True):  'bottom_range',
+        ('both_mid',            False): 'top_range',
+    }
+
+    assigned = np.zeros(n, dtype=bool)
+    for mask, name in conds:
+        m = mask & valid & ~assigned
+        if not m.any():
+            continue
+        idx = np.flatnonzero(m)
+        pos_sel = p1_2_pos[idx]
+        vals = np.array(
+            [table[(name, bool(p))] for p in pos_sel],
+            dtype=object,
+        )
+        patterns[idx] = vals
+        assigned |= m
+
+    df['pattern18'] = patterns
+
+    if add_codes:
+        codes = sorted(set(patterns.tolist()))
+        mapping = {name: i for i, name in enumerate(codes)}
+        df['pattern18_code'] = np.array(
+            [mapping[p] for p in patterns], dtype=np.int16
+        )
+    return df
+
+def add_zzw_levels_260926(df: pd.DataFrame, buffer_percent: float = 0.1) -> pd.DataFrame:
+    """
+    Добавляет bzp1..bzp4, target, btarget, mzp на основе 4 последних wzp.
+    """
+    cols = _last_wzp_cols(df, 4)
+    zp1, zp2, zp3, zp4 = (df[c].to_numpy(dtype=float) for c in cols)
+
+    p1_2 = zp1 - zp2
+    p2_3 = zp2 - zp3
+    p3_4 = zp3 - zp4
+    df['zp1'] = zp1
+    df['zp2'] = zp2
+    df['zp3'] = zp3
+    df['zp4'] = zp4
+    df['bzp1'] = zp1 - np.sign(p2_3) * np.abs(p2_3) * buffer_percent
+    df['bzp2'] = zp2 + np.sign(p2_3) * np.abs(p2_3) * buffer_percent
+    df['bzp3'] = zp3 - np.sign(p3_4) * np.abs(p3_4) * buffer_percent
+    df['bzp4'] = zp4 + np.sign(p3_4) * np.abs(p3_4) * buffer_percent
+
+    df['target']  = zp4 - p2_3
+    df['btarget'] = zp4 - p2_3 * (1 - buffer_percent / 2)
+    df['mzp']     = (zp3 + zp4) / 2
+
+    return df
+
+def add_stop_loss_p18zzw_260926(df, divider=2):
+    """
+    Добавляет 'lsl' и 'ssl' на основе 2 последних точек зигзага.
+    Например, если max wzp = 8, берутся wzp7 и wzp8.
+    """
+
+    c3, c4 = _last_wzp_cols(df, 2)
+    zp3 = df[c3]
+    zp4 = df[c4]
+
+    cur_range = (zp3 - zp4).abs()
+
+    min_zp = pd.concat([zp3, zp4], axis=1).min(axis=1)
+    max_zp = pd.concat([zp3, zp4], axis=1).max(axis=1)
+
+    df['cur_range'] = cur_range
+    df['lsl'] = min_zp + cur_range / divider
+    df['ssl'] = max_zp - cur_range / divider
+
+    return df
+
+def add_drop_last_wzp(
+    df: pd.DataFrame,
+    also_idx: bool = True,
+    also_derived: bool = False,
+) -> pd.DataFrame:
+    """
+    Удаляет последнюю колонку wzpN (с максимальным N) и, опционально,
+    связанные колонки.
+
+    Параметры:
+        also_idx     — если True, удаляет также idx_wzpN (парную к wzpN).
+        also_derived — если True, удаляет производные колонки, привязанные
+                       к последним 4 wzp: bzp1..bzp4, target, btarget, mzp,
+                       cur_range, lsl, ssl, pattern18, pattern18_code.
+
+    Возвращает новый df (не мутирует исходный).
+    """
+    # находим все номера wzpN
+    ns = []
+    for col in df.columns:
+        m = re.fullmatch(r'wzp(\d+)', col)
+        if m:
+            ns.append(int(m.group(1)))
+
+    if not ns:
+        return df
+
+    last_n = max(ns)
+    if last_n < 5:
+        return df
+    to_drop = [f'wzp{last_n}']
+    if also_idx and f'idx_wzp{last_n}' in df.columns:
+        to_drop.append(f'idx_wzp{last_n}')
+
+    if also_derived:
+        derived = [
+            'bzp1', 'bzp2', 'bzp3', 'bzp4',
+            'target', 'btarget', 'mzp',
+            'cur_range', 'lsl', 'ssl',
+            'pattern18', 'pattern18_code',
+        ]
+        to_drop += [c for c in derived if c in df.columns]
+
+    # на всякий случай убираем дубликаты
+    to_drop = list(dict.fromkeys(to_drop))
+
+    return df.drop(columns=to_drop)
+"""
+Название главной функции add_zigzag_window_220926, суффикс для доп функций _zzw220926
+Параметры главной функиции df, n_points=8, period=55
+1. Надой пройтись окном [i-period:i] по датафрейму (i включаем в окно)
+2. Ищем в каждом окне максимум и минимум (это две опорные точки ОТ1 и ОТ2)
+3. Далее берем расстояние в барах между ЛКО (левый край окна) и ОТ1, ОТ1 и ОТ2, ОТ2 и ПКО
+4. Выбираем большее из них и находим там 2 точки. Тут есть два варианта:
+ а) диапазон между двумя точками. Стороим линию т1 и т2. Вычисляем разницу между dhl = high-line и dll = line-low. Берем бар с максимальным dhl или dll. Здесь важно учесть порядок типов, если у нас новая точка А одинакого типа с т1, то искать точку Б, будем между ними, инача, между А:т2. Точка Б можно найти, как локальный экстремум. После чего надо будет убедиться, что точка А - это тоже локальный экстремум в окне между Т1 и Б или Б и т2 в зависимости от того, где мы искали. Если нет переместить точку туда.
+ б) диапазон между краем и точкой. Здесь берем сначала экстремум противоположный точке на открезке край:точка или точка:край. А затем экстремум противоположный новой точке на отрезке край:новая точка или новая точка:край
+5. точки могут быть на одном баре, если это происходит, то значение сохраняем, а индекс левой точки смещаем на 1 назад.
+6. Железобетонное правило нужно соблюдать строгий порядок чередования L-H-L-H или H-L-H-L.
+7. все точки должны быть определенны всегда, кроме случая, когда period < n_points
+8. Все это выполняется в цикле, пока точек меньше, чем n_points. При этом расстояние мы проверяемся между всеми уже добавленными точками и ищем самом большое
+"""
+
+
+def find_extremum_zzw260926(h, l, from_pos, to_pos, kind):
+    """Первый экстремум в [from_pos, to_pos). kind: 'H' или 'L'."""
+    if to_pos - from_pos < 1:
+        return None
+    if kind == 'H':
+        sub = h[from_pos:to_pos]
+        k = int(np.argmax(sub))
+        return (from_pos + k, sub[k], 'H')
+    else:
+        sub = l[from_pos:to_pos]
+        k = int(np.argmin(sub))
+        return (from_pos + k, sub[k], 'L')
+
+
+def find_extremum_last_zzw260926(h, l, from_pos, to_pos, kind):
+    """Последний экстремум в [from_pos, to_pos). kind: 'H' или 'L'."""
+    if to_pos - from_pos < 1:
+        return None
+    if kind == 'H':
+        sub = h[from_pos:to_pos]
+        m = sub.max()
+        k = int(np.flatnonzero(sub == m)[-1])
+        return (from_pos + k, sub[k], 'H')
+    else:
+        sub = l[from_pos:to_pos]
+        m = sub.min()
+        k = int(np.flatnonzero(sub == m)[-1])
+        return (from_pos + k, sub[k], 'L')
+
+
+# ---------- зоны ----------
+
+def pick_zone_zzw260926(S_left, S_mid, S_right, tol_frac):
+    max_size = max(S_left, S_mid, S_right)
+    if max_size <= 0:
+        return 'mid'
+    threshold = max_size - tol_frac * max_size
+    # порядок важен: right -> mid -> left
+    if S_right >= threshold:
+        return 'right'
+    if S_mid >= threshold:
+        return 'mid'
+    return 'left'
+
+
+# ---------- mid-логика: черновые + уточнение ----------
+
+def mid_extras_zzw260926(h, l, L_pos, L_type, R_pos, R_type):
+    """
+    Логика mid с двумя проходами:
+      1. th2_temp — экстремум в левой половине [L, mid(L,R)]
+      2. tl3_temp — экстремум в правой половине [th2_temp, R]
+      3. h2_real  — последний экстремум в [L+1, tl3_temp)
+      4. l3_real  — последний экстремум в [h2_real+1, R)
+
+    Возвращает 2 уточнённые точки (h2_real, l3_real).
+    Чередование типов нерушимо: L → p1(opp L) → p2(как L) → R.
+    Конвенция границ: левая включается, правая — нет.
+    """
+    p1_type = 'L' if L_type == 'H' else 'H'
+    p2_type = L_type
+
+    # --- черновая th2 ---
+    mid1 = (L_pos + R_pos) // 2
+    th2 = find_extremum_zzw260926(h, l, L_pos + 1, mid1 + 1, p1_type)
+    if th2 is None:
+        th2 = find_extremum_zzw260926(h, l, L_pos + 1, R_pos, p1_type)
+    if th2 is None:
+        return []
+
+    # --- черновая tl3 ---
+    mid2 = (th2[0] + R_pos) // 2
+    tl3 = find_extremum_zzw260926(h, l, th2[0] + 1, mid2 + 1, p2_type)
+    if tl3 is None:
+        tl3 = find_extremum_zzw260926(h, l, th2[0] + 1, R_pos, p2_type)
+    if tl3 is None:
+        return [th2]
+
+    # --- уточнение h2_real: последний экстремум в [L+1, tl3) ---
+    h2_real = find_extremum_last_zzw260926(h, l, L_pos + 1, tl3[0], p1_type)
+    if h2_real is None:
+        h2_real = th2
+
+    # --- уточнение l3_real: последний экстремум в [h2_real+1, R) ---
+    l3_real = find_extremum_last_zzw260926(h, l, h2_real[0] + 1, R_pos, p2_type)
+    if l3_real is None:
+        l3_real = tl3
+
+    return [h2_real, l3_real]
+
+
+# ---------- helpers для Шагов 5/5.5/6 ----------
+
+def _build_alternating_sequence_260926(all_points, h, l):
+    """Чередование с дозаполнением между соседями одного типа."""
+    validated = [all_points[0]]
+    for p in all_points[1:]:
+        prev = validated[-1]
+        if p[2] == prev[2]:
+            opposite = 'L' if p[2] == 'H' else 'H'
+            extra = find_extremum_zzw260926(h, l, prev[0] + 1, p[0], opposite)
+            if extra is not None:
+                validated.append(extra)
+            validated.append(p)
+        else:
+            validated.append(p)
+    return validated
+
+
+def _dedupe_points_260926(pts):
+    seen = set()
+    unique = []
+    for p in pts:
+        key = (p[0], p[2])
+        if key not in seen:
+            unique.append(p)
+            seen.add(key)
+    return unique
+
+
+def _trim_to_n_260926(validated, L_pos, R_pos, op_positions, n_points):
+    """Обрезка до n_points с приоритетом опорных L_pos/R_pos."""
+    if len(validated) > n_points:
+        validated = _dedupe_points_260926(validated)
+
+    if len(validated) > n_points:
+        final = validated[:n_points]
+        positions_in_final = {p[0] for p in final}
+        for op_pos in (L_pos, R_pos):
+            if op_pos not in positions_in_final:
+                op_point = next(p for p in validated if p[0] == op_pos)
+                non_op_indices = [idx for idx, p in enumerate(final)
+                                  if p[0] != L_pos and p[0] != R_pos]
+                if non_op_indices:
+                    final[non_op_indices[-1]] = op_point
+        final.sort(key=lambda p: (p[0], p[0] not in op_positions))
+        validated = final
+
+    return validated
+
+
+def _has_strict_alternation_260926(pts):
+    for k in range(len(pts) - 1):
+        if pts[k][2] == pts[k + 1][2]:
+            return False
+    return True
+
+
+# ---------- расширение до n точек ----------
+
+def _insert_two_points_in_gap_260926(h, l, A, B, kind_A, kind_B):
+    """
+    Вставляет 2 точки между A и B так, чтобы чередование сохранилось.
+    Ожидается kind_A != kind_B.
+    Возвращает [p1, p2] или [] / [p1] при нехватке места.
+    """
+    p1_type = kind_B   # противоположен A
+    p2_type = kind_A   # как у A
+
+    if B[0] - A[0] < 3:  # нужно минимум 3 позиции между: p1, p2 и запас
+        return []
+
+    mid1 = (A[0] + B[0]) // 2
+    p1 = find_extremum_zzw260926(h, l, A[0] + 1, mid1 + 1, p1_type)
+    if p1 is None:
+        p1 = find_extremum_zzw260926(h, l, A[0] + 1, B[0], p1_type)
+    if p1 is None:
+        return []
+
+    mid2 = (p1[0] + B[0]) // 2
+    p2 = find_extremum_zzw260926(h, l, p1[0] + 1, mid2 + 1, p2_type)
+    if p2 is None:
+        p2 = find_extremum_zzw260926(h, l, p1[0] + 1, B[0], p2_type)
+    if p2 is None:
+        return [p1]
+
+    # уточнение: последний экстремум нужного типа в своих окнах
+    p1_real = find_extremum_last_zzw260926(h, l, A[0] + 1, p2[0], p1_type)
+    if p1_real is None:
+        p1_real = p1
+    p2_real = find_extremum_last_zzw260926(h, l, p1_real[0] + 1, B[0], p2_type)
+    if p2_real is None:
+        p2_real = p2
+
+    return [p1_real, p2_real]
+
+
+def _expand_to_n_points_260926(h, l, validated, L_pos, R_pos,
+                                op_positions, n_points):
+    """
+    Расширяет список validated до n_points (кратно 2), добавляя по 2 точки
+    в самый широкий интервал. Сохраняет чередование L-H-L-H-...
+    """
+    guard = 0
+    while len(validated) < n_points and guard < 100:
+        guard += 1
+
+        # ищем самый широкий внутренний интервал
+        best_k = -1
+        best_width = -1
+        for k in range(len(validated) - 1):
+            width = validated[k + 1][0] - validated[k][0] - 1
+            if width > best_width:
+                best_width = width
+                best_k = k
+
+        if best_k < 0 or best_width < 1:
+            break  # некуда вставлять
+
+        A = validated[best_k]
+        B = validated[best_k + 1]
+        new_pts = _insert_two_points_in_gap_260926(h, l, A, B, A[2], B[2])
+        if not new_pts:
+            # не удалось — прекращаем, чтобы не зациклиться
+            break
+
+        for p in reversed(new_pts):
+            validated.insert(best_k + 1, p)
+
+    return validated
+
+
+# ---------- основной пайплайн ----------
+
+def add_zigzag_window_260926(df, period=55, tol_frac=0.10, n_points=6):
+    """
+    Хорошая оконная версия
+    n_points — желаемое количество точек в окне (кратно 2, минимум 4).
+    Если задано нечётное — округляется вверх до чётного.
+    """
+    if n_points < 4:
+        n_points = 4
+    if n_points % 2 != 0:
+        n_points += 1
+
+    n = len(df)
+    high = df['high'].to_numpy(dtype=float)
+    low = df['low'].to_numpy(dtype=float)
+    df_index = df.index.to_numpy()
+
+    # 2D-массивы: n_points × n баров
+    wzp_prices = np.full((n_points, n), np.nan)
+    wzp_idx = np.full((n_points, n), np.nan)
+
+    for i in range(period - 1, n):
+        start = i - period + 1
+
+        h = high[start:start + period]
+        l = low[start:start + period]
+
+        # --- Шаг 1: опорные точки ---
+        pos_max = int(np.argmax(h))
+        pos_min = int(np.argmin(l))
+
+        if pos_max == pos_min:
+            h_masked = h.copy()
+            l_masked = l.copy()
+            h_masked[pos_max] = -np.inf
+            l_masked[pos_min] = np.inf
+            alt_max = int(np.argmax(h_masked))
+            alt_min = int(np.argmin(l_masked))
+            if h[pos_max] - h[alt_max] <= l[alt_min] - l[pos_min]:
+                pos_max = alt_max
+            else:
+                pos_min = alt_min
+
+        if pos_max < pos_min:
+            L_pos, L_type = pos_max, 'H'
+            R_pos, R_type = pos_min, 'L'
+        else:
+            L_pos, L_type = pos_min, 'L'
+            R_pos, R_type = pos_max, 'H'
+
+        L_price = h[L_pos] if L_type == 'H' else l[L_pos]
+        R_price = h[R_pos] if R_type == 'H' else l[R_pos]
+
+        # --- Шаг 2: зоны ---
+        S_left = L_pos
+        S_mid = R_pos - L_pos - 1
+        S_right = period - 1 - R_pos
+
+        chosen = pick_zone_zzw260926(S_left, S_mid, S_right, tol_frac)
+
+        # --- Шаг 3: 2 дополнительные точки ---
+        extras = []
+
+        if chosen == 'left':
+            t1 = 'L' if L_type == 'H' else 'H'
+            t2 = L_type
+            p1 = find_extremum_last_zzw260926(h, l, 0, L_pos, t1)
+            if p1 is not None:
+                extras.append(p1)
+                p2 = find_extremum_last_zzw260926(h, l, 0, p1[0], t2)
+                if p2 is not None:
+                    extras.append(p2)
+
+        elif chosen == 'right':
+            t1 = 'L' if R_type == 'H' else 'H'
+            t2 = R_type
+            p1 = find_extremum_zzw260926(h, l, R_pos + 1, period, t1)
+            if p1 is not None:
+                extras.append(p1)
+                p2 = find_extremum_zzw260926(h, l, p1[0], period, t2)
+                if p2 is not None:
+                    extras.append(p2)
+
+        else:  # mid
+            extras = mid_extras_zzw260926(h, l, L_pos, L_type, R_pos, R_type)
+
+        # --- Шаг 4: сборка и сортировка ---
+        op_positions = (L_pos, R_pos)
+        all_points = [(L_pos, L_price, L_type), (R_pos, R_price, R_type)] + extras
+        all_points.sort(key=lambda p: (p[0], 0 if p[0] in op_positions else 1))
+
+        # --- Шаг 5 + 5.5 ---
+        validated = _build_alternating_sequence_260926(all_points, h, l)
+        validated = _trim_to_n_260926(validated, L_pos, R_pos, op_positions, 4)
+
+        # --- Шаг 6: fallback на mid-логику ---
+        if len(validated) < 4 or not _has_strict_alternation_260926(validated):
+            extras_mid = mid_extras_zzw260926(h, l, L_pos, L_type, R_pos, R_type)
+            all_points_mid = [(L_pos, L_price, L_type),
+                              (R_pos, R_price, R_type)] + extras_mid
+            all_points_mid.sort(key=lambda p: (p[0], 0 if p[0] in op_positions else 1))
+
+            validated = _build_alternating_sequence_260926(all_points_mid, h, l)
+            validated = _trim_to_n_260926(validated, L_pos, R_pos, op_positions, 4)
+
+        # --- Шаг 6.5: крайний fallback ---
+        while len(validated) < 4:
+            last = validated[-1]
+            if last[2] == 'H':
+                validated.append((last[0], l[last[0]], 'L'))
+            else:
+                validated.append((last[0], h[last[0]], 'H'))
+
+        # --- Шаг 7: расширение до n_points ---
+        if n_points > 4:
+            validated = _expand_to_n_points_260926(
+                h, l, validated, L_pos, R_pos, op_positions, n_points
+            )
+
+        # добиваем до n_points, если расширение не смогло
+        while len(validated) < n_points:
+            last = validated[-1]
+            if last[2] == 'H':
+                validated.append((last[0], l[last[0]], 'L'))
+            else:
+                validated.append((last[0], h[last[0]], 'H'))
+
+        points = validated[:n_points]
+
+        # --- Шаг 8: индексы с разрешением коллизий ---
+        raw_idx = [p[0] for p in points]
+        final_idx = raw_idx[:]
+        changed = True
+        it = 0
+        while changed and it < 100:
+            changed = False
+            it += 1
+            for k in range(len(final_idx) - 1):
+                if final_idx[k] >= final_idx[k + 1]:
+                    if final_idx[k] - 1 >= 0:
+                        final_idx[k] -= 1
+                        changed = True
+                    elif final_idx[k + 1] + 1 < period:
+                        final_idx[k + 1] += 1
+                        changed = True
+
+        for k in range(n_points):
+            wzp_prices[k, i] = points[k][1]
+            wzp_idx[k, i] = df_index[start + final_idx[k]]
+
+    for k in range(n_points):
+        df[f'wzp{k+1}'] = wzp_prices[k]
+        df[f'idx_wzp{k+1}'] = wzp_idx[k]
+
+    return df
+
+def _get_wzp_cols(df):
+    """Возвращает (wzp_cols, idx_cols, n) — упорядоченные по номеру N."""
+    wzp_map = {}
+    idx_map = {}
+    for col in df.columns:
+        m = re.fullmatch(r'wzp(\d+)', col)
+        if m:
+            wzp_map[int(m.group(1))] = col
+            continue
+        m = re.fullmatch(r'idx_wzp(\d+)', col)
+        if m:
+            idx_map[int(m.group(1))] = col
+
+    # берём только те N, для которых есть обе колонки
+    common_ns = sorted(set(wzp_map) & set(idx_map))
+    wzp_cols = [wzp_map[n] for n in common_ns]
+    idx_cols = [idx_map[n] for n in common_ns]
+    return wzp_cols, idx_cols, common_ns
+
+
+def add_mean_ind_wzz_peaks(df, kind='rsi'):
+    """
+    Добавляет колонки:
+      - mean_H_<kind> : среднее <kind> в точках-максимумах (H)
+      - mean_L_<kind> : среднее <kind> в точках-минимумах (L)
+    Тип точки определяется чередованием H/L. Чередование выводится из
+    соотношения первых двух валидных wzp-точек.
+    """
+    mean_H_col = f'mean_H_{kind}'
+    mean_L_col = f'mean_L_{kind}'
+
+    wzp_cols, idx_cols, ns = _get_wzp_cols(df)
+    if len(ns) < 2:
+        # нечего считать
+        df[mean_H_col] = np.nan
+        df[mean_L_col] = np.nan
+        return df
+
+    kind_values = df[kind].to_numpy()
+    wzp_arr = df[wzp_cols].to_numpy(dtype=float)   # (N, K)
+    idx_arr = df[idx_cols].to_numpy(dtype=float)   # (N, K)
+
+    N, K = wzp_arr.shape
+    mean_H = np.full(N, np.nan)
+    mean_L = np.full(N, np.nan)
+
+    for i in range(N):
+        w = wzp_arr[i]
+        idx = idx_arr[i]
+
+        mask = ~np.isnan(w) & ~np.isnan(idx)
+        valid_positions = np.where(mask)[0]
+        if valid_positions.size < 2:
+            continue
+
+        # определяем чередование по первым двум валидным точкам
+        p0, p1 = valid_positions[0], valid_positions[1]
+        # если p0 выше p1 -> p0=H, далее чередуем
+        # шаблон типов по позициям 0..K-1
+        start_type = 'H' if w[p0] > w[p1] else 'L'
+        # если p0 нечётная позиция, шаблон сдвигается — проще задать
+        # тип для каждой валидной точки от её позиции относительно p0
+        def type_at(p):
+            # p0 -> start_type, p0+1 -> противоположный, и т.д.
+            return start_type if (p - p0) % 2 == 0 else ('L' if start_type == 'H' else 'H')
+
+        hs, ls = [], []
+        for p in valid_positions:
+            k = int(round(idx[p]))
+            if 0 <= k < N:
+                val = kind_values[k]
+                if not np.isnan(val):
+                    if type_at(p) == 'H':
+                        hs.append(val)
+                    else:
+                        ls.append(val)
+
+        if hs:
+            mean_H[i] = float(np.mean(hs))
+        if ls:
+            mean_L[i] = float(np.mean(ls))
+
+    df[mean_H_col] = mean_H
+    df[mean_L_col] = mean_L
+    return df
+
+def add_extreme_ind_wzz_peaks(df, kind='rsi', window_mode='between', half_window=3):
+    """
+    Для каждой строки считает среднее <kind> в точках H (максимумы) и L (минимумы),
+    где под H понимается локальный МАКСИМУМ <kind> в окне вокруг idx_wzpN,
+    а под L — локальный МИНИМУМ.
+
+    window_mode:
+      'between' — окно между соседними противоположными точками (H между двумя L,
+                  L между двумя H). Для крайних точек — от края df до соседней точки.
+      'fixed'   — фиксированное окно ±half_window вокруг idx_wzpN.
+
+    Добавляет колонки:
+      - max_H_<kind> : среднее <kind> в H-точках
+      - min_L_<kind> : среднее <kind> в L-точках
+    """
+    max_H_col = f'max_H_{kind}'
+    min_L_col = f'min_L_{kind}'
+
+    wzp_cols, idx_cols, ns = _get_wzp_cols(df)
+    if len(ns) < 2:
+        df[max_H_col] = np.nan
+        df[min_L_col] = np.nan
+        return df
+
+    kind_values = df[kind].to_numpy(dtype=float)
+    wzp_arr = df[wzp_cols].to_numpy(dtype=float)
+    idx_arr = df[idx_cols].to_numpy(dtype=float)
+
+    N, K = wzp_arr.shape
+    max_H = np.full(N, np.nan)
+    min_L = np.full(N, np.nan)
+
+    for i in range(N):
+        w = wzp_arr[i]
+        idx = idx_arr[i]
+
+        mask = ~np.isnan(w) & ~np.isnan(idx)
+        valid_positions = np.where(mask)[0]
+        if valid_positions.size < 2:
+            continue
+
+        p0, p1 = valid_positions[0], valid_positions[1]
+        start_type = 'H' if w[p0] > w[p1] else 'L'
+
+        def type_at(p):
+            return start_type if (p - p0) % 2 == 0 else ('L' if start_type == 'H' else 'H')
+
+        # позиции в df для валидных точек
+        pos_in_df = np.array([int(round(idx[p])) for p in valid_positions])
+        # фильтруем выходящие за пределы df
+        ok = (pos_in_df >= 0) & (pos_in_df < N)
+        valid_positions = valid_positions[ok]
+        pos_in_df = pos_in_df[ok]
+
+        if valid_positions.size < 2:
+            continue
+
+        hs, ls = [], []
+        for j, p in enumerate(valid_positions):
+            k = pos_in_df[j]
+            t = type_at(p)
+
+            if window_mode == 'fixed':
+                lo = max(0, k - half_window)
+                hi = min(N, k + half_window + 1)
+            else:  # 'between'
+                if j == 0:
+                    # левая крайняя: окно от 0 до соседней точки
+                    lo = 0
+                    hi = pos_in_df[j + 1] + 1
+                elif j == valid_positions.size - 1:
+                    lo = pos_in_df[j - 1]
+                    hi = N
+                else:
+                    lo = pos_in_df[j - 1]
+                    hi = pos_in_df[j + 1] + 1
+
+            segment = kind_values[lo:hi]
+            segment = segment[~np.isnan(segment)]
+            if segment.size == 0:
+                continue
+
+            if t == 'H':
+                hs.append(float(np.max(segment)))
+            else:
+                ls.append(float(np.min(segment)))
+
+        if hs:
+            max_H[i] = float(np.mean(hs))
+        if ls:
+            min_L[i] = float(np.mean(ls))
+
+    df[max_H_col] = max_H
+    df[min_L_col] = min_L
+    return df
