@@ -119,6 +119,8 @@ class BaseTE:
         return action
 
     def check_valid_action(self, action: Any, pos: int) -> Any:
+        if isinstance(action, dict):
+            return action
         if pos < 0:
             self.can_long = True
         elif pos > 0:
@@ -151,17 +153,22 @@ class BaseTE:
         return {}
 
     def get_raw_action(self, pdata: Dict[str, Any]) -> Any:
-        """Обычный режим"""
+        """Обычный и быстрый режимы"""
         chart = pdata.get('chart', None)
-        row = self.get_test_row(chart)
+        if chart is None or chart.empty:
+            return None
+        if pdata.get('fast_mode') and 'idx' in pdata:
+            row = chart.iloc[pdata['idx']]
+        else:
+            row = self.get_test_row(chart)
         if row is None:
             return None
         return self._get_action_from_row(row)
 
+
     def get_raw_action_fast(self, pdata_fast: Dict[str, Any]) -> Any:
         """Быстрый режим"""
-        row = pdata_fast['chart'].iloc[pdata_fast['idx']]
-        return self._get_action_from_row(row)
+        return self.get_raw_action(pdata_fast)
 
     def _get_action_from_row(self, row: pd.Series) -> Any:
         """Основная логика стратегии. Переопределяется в каждой стратегии."""

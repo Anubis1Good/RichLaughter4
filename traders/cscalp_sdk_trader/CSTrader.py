@@ -402,6 +402,76 @@ class CSTrader:
 
         return orders
 
+    def _level_action_to_orders(
+        self,
+        bot: Dict[str, Any],
+        action: str,
+        current_amount: int,
+        bp: Dict[str, Any],
+        levels: List[float],
+    ) -> List[Dict[str, Any]]:
+        """Формирует заявки по ценовым уровням из pdata['levels'] ('spred_all_level', 'open_long_level' и т.д.)."""
+        if not levels:
+            return []
+
+        parts = action.split('_')
+        type_action = parts[0]   # 'spred', 'open', 'close'
+        dir_action = parts[1]    # 'long', 'short', 'all'
+
+        step = bot['step']
+        decimals = bot['decimals']
+        lot = bot['lot']
+
+        bbid = bp.get('bestBid', 0.0)
+        bask = bp.get('bestAsk', 0.0)
+        if bbid <= 0 or bask <= 0 or bask < bbid:
+            return []
+
+        # Округляем уровни до шага цены инструмента
+        clean_levels = [round(round(float(lvl) / step) * step, decimals) for lvl in levels if lvl is not None and lvl > 0]
+
+        # Для покупки берем ближайший уровень строго ниже bask (мейкерская лимитка без удара в рынок)
+        buy_candidates = [lvl for lvl in clean_levels if lvl < bask]
+        buy_price = max(buy_candidates) if buy_candidates else None
+
+        # Для продажи берем ближайший уровень строго выше bbid (мейкерская лимитка без удара в рынок)
+        sell_candidates = [lvl for lvl in clean_levels if lvl > bbid]
+        sell_price = min(sell_candidates) if sell_candidates else None
+
+        orders: List[Dict[str, Any]] = []
+
+        if type_action == 'spred':
+            if dir_action == 'long':
+                if current_amount < lot and buy_price is not None:
+                    orders.append({'side': 'BUY', 'amount': lot - current_amount, 'price': buy_price})
+                if current_amount > 0 and sell_price is not None:
+                    orders.append({'side': 'SELL', 'amount': current_amount, 'price': sell_price})
+            elif dir_action == 'short':
+                if current_amount > -lot and sell_price is not None:
+                    orders.append({'side': 'SELL', 'amount': lot + current_amount, 'price': sell_price})
+                if current_amount < 0 and buy_price is not None:
+                    orders.append({'side': 'BUY', 'amount': abs(current_amount), 'price': buy_price})
+            else:  # 'all'
+                if current_amount < lot and buy_price is not None:
+                    orders.append({'side': 'BUY', 'amount': lot - current_amount, 'price': buy_price})
+                if current_amount > -lot and sell_price is not None:
+                    orders.append({'side': 'SELL', 'amount': lot + current_amount, 'price': sell_price})
+
+        elif type_action == 'open':
+            if dir_action in ('long', 'all') and current_amount < lot and buy_price is not None:
+                orders.append({'side': 'BUY', 'amount': lot - current_amount, 'price': buy_price})
+            if dir_action in ('short', 'all') and current_amount > -lot and sell_price is not None:
+                orders.append({'side': 'SELL', 'amount': lot + current_amount, 'price': sell_price})
+
+        else:  # 'close'
+            if dir_action in ('long', 'all') and current_amount > 0 and sell_price is not None:
+                orders.append({'side': 'SELL', 'amount': abs(current_amount), 'price': sell_price})
+            if dir_action in ('short', 'all') and current_amount < 0 and buy_price is not None:
+                orders.append({'side': 'BUY', 'amount': abs(current_amount), 'price': buy_price})
+
+        return orders
+
+
     def _work_action(
         self,
         slot: str,
@@ -410,6 +480,7 @@ class CSTrader:
         action: Any,
         current_amount: int,
         bp: Dict[str, Any],
+        levels: Optional[List[float]] = None
     ):
         lot = bot['lot']
         desired_orders: List[Dict[str, Any]] = []
@@ -421,6 +492,8 @@ class CSTrader:
         elif isinstance(action, str):
             if 'step' in action:
                 desired_orders = self._step_action_to_orders(bot, action, current_amount, bp)
+            elif 'level' in action:
+                desired_orders = self._level_action_to_orders(bot, action, current_amount, bp, levels or [])
             elif action in ('close_long', 'stop_close_long'):
                 if current_amount > 0:
                     desired_orders = self._target_amount_to_orders(current_amount, 0)
@@ -501,7 +574,7 @@ class CSTrader:
                             'bp': bp,
                             'orders': orders_info,
                         }
-
+                levels = pdata.get('levels') if isinstance(pdata, dict) else None
                 if isinstance(action, dict):
                     for target_ticker, sub_action in action.items():
                         sub_bot = self.active_bots.get((slot, target_ticker))
@@ -514,9 +587,9 @@ class CSTrader:
                             sub_pos = self.client.get_position(slot, target_ticker)
                             sub_amount = int(sub_pos.get('amount', 0))
                             sub_bp = self.client.get_best_prices(slot, target_ticker)
-                        self._work_action(slot, target_ticker, sub_bot, sub_action, sub_amount, sub_bp)
+                        self._work_action(slot, target_ticker, sub_bot, sub_action, sub_amount, sub_bp,levels)
                 else:
-                    self._work_action(slot, ticker, bot, action, current_amount, bp)
+                    self._work_action(slot, ticker, bot, action, current_amount, bp,levels)
 
             except Exception as err:
                 self._log_error(slot, ticker, err)

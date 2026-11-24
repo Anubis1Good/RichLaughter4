@@ -9,7 +9,8 @@ pc_groups = {
             'AFLT': (1, base_tf),
             'ALRS': (1, base_tf),
             'ASTR': (1, base_tf),
-            'MTLR': (5, base_tf),
+            'OZPH': (1, base_tf),
+            # 'MTLR': (5, base_tf),
         },
     },
     'SECOND_PC': {

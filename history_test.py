@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-from testing.CheckEGTrader import CheckEGTrader
+from testing.CheckTETrader import CheckTETrader
 from strategies.all_tes import *
 from strategies.helpTEs.debugTE import DebugAction,DebugMean
 from testing.test_constants import *
@@ -16,10 +16,10 @@ symbol = PATH_DF.split('\\')[-1].split('_')[0]
 # ws = [UEG4_FALCON,],
 
 # ws = (PEG30_ETC,(None,None,1,5,1,1,11,6,37,15,14,65),1,None)
-ws = (PTE2_DDCrWork,[])
+ws = (PTE30_ETC2,[])
 # ws = (UEG7_LOVERDUCK,[])
 # ws = (DebugMean,[])
-cegt = CheckEGTrader(
+cegt = CheckTETrader(
     PATH_DF,
     ws,
     MAIN_FEE,
@@ -43,8 +43,7 @@ cegt.print_statistics()
 
 cegt.plot_chart_and_sequtity()
 # cegt.ws.debug_data = []
-cegt.check_strategy_window(normalization=True)
-# cegt.check_strategy_window(normalization=False)
+cegt.check_strategy_window(normalization=False)
 # ef_window = cegt.trade_data['step_eq_fee']
 # eqf = cegt.trade_data['equity_fee']
 # print(eqf)
