@@ -9,13 +9,13 @@ pc_groups = {
             'AFLT': (1, base_tf),
             'ALRS': (1, base_tf),
             'ASTR': (1, base_tf),
-            'MTLR': (1, base_tf),
+            'MTLR': (5, base_tf),
         },
     },
     'SECOND_PC': {
         'LiteInvest:stockLI': {
             'SBER': (1, base_tf),
-            'GAZP': (1, base_tf),
+            'APTK': (1, base_tf),
         },
     },
 }

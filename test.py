@@ -1,4 +1,3 @@
-from traders.cscalp_sdk_trader.CscalpClient import CscalpClient
-c = CscalpClient()
-c.subscribe("LiteInvest:stockLI", ["VTBR"])
-print(c.get_position("LiteInvest:stockLI", "VTBR"))
+import requests
+print(requests.get("http://localhost:7777/debug-cluster-type").json())
+

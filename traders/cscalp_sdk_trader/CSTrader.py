@@ -81,16 +81,18 @@ class CSTrader:
 
         for (slot, ticker), bot in self.active_bots.items():
             deadline = time.time() + 15.0
+            last_err = None
             while True:
                 try:
                     bp = self.client.get_best_prices(slot, ticker)
                     if 'step' in bp and 'decimals' in bp and bp['step'] > 0:
                         break
-                except Exception:
-                    pass
+                    last_err = f"Некорректный ответ bp: {bp}"
+                except Exception as e:
+                    last_err = e
 
                 if time.time() > deadline:
-                    raise TimeoutError(f"Не удалось получить стакан и шаг цены для {slot}:{ticker} за 15 сек.")
+                    raise TimeoutError(f"Не удалось получить стакан для {slot}:{ticker} за 15 сек. Причина: {last_err}")
                 time.sleep(0.2)
 
             step = bp['step']
@@ -281,7 +283,7 @@ class CSTrader:
                 tdata['spred'] = round((bp['bestAsk'] - bp['bestBid']) / step) if step else 0
 
             if 'full_glass' in needs or 'orderbook' in needs:
-                tdata['fg'] = self.client.get_orderbook(slot, ticker, depth=20)
+                tdata['fg'] = self.client.get_glass_df(slot, ticker, depth=20, step=bot['step'], decimals=bot['decimals'])
 
             if 'poss' in needs:
                 tdata['poss'] = {
@@ -290,6 +292,10 @@ class CSTrader:
 
             if 'orders' in needs:
                 tdata['orders'] = orders_info
+            
+            if 'clusters' in needs:
+                tdata['clusters'] = self.client.get_clusters(slot, ticker, tf_minutes=tf, limit=50)
+
 
         return tdata
 

@@ -1,4 +1,4 @@
 @echo off
 cd ..
-python "startVT.py"
+python "startCS.py"
 pause
