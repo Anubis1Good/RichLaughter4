@@ -5,7 +5,7 @@ from strategies.helpTEs.debugTE import DebugAction,DebugMean
 from testing.test_constants import *
 
 
-# PATH_DF = '_data_for_tests\data_stock_5m\CHMF_5_1792258136.parquet'
+PATH_DF = '_data_for_tests\_temp\TATNP_5_1794677317.parquet'
 symbol = PATH_DF.split('\\')[-1].split('_')[0]
 # fee = 0.001
 # window = 60
@@ -16,7 +16,7 @@ symbol = PATH_DF.split('\\')[-1].split('_')[0]
 # ws = [UEG4_FALCON,],
 
 # ws = (PEG30_ETC,(None,None,1,5,1,1,11,6,37,15,14,65),1,None)
-ws = (PTE30_ETC2,[])
+ws = (UTE10_SHERIFFPRO,[])
 # ws = (UEG7_LOVERDUCK,[])
 # ws = (DebugMean,[])
 cegt = CheckTETrader(
@@ -33,8 +33,9 @@ cegt = CheckTETrader(
 # cegt.df = cegt.df.iloc[-500:]
 # cegt.check_strategy_fast()
 # cegt.print_statistics()
-# cegt.check_strategy_faster()
-cegt.check_strategy_faster(debug=True)
+cegt.check_strategy_faster()
+# cegt.check_strategy_faster(debug=True)
+# cegt.check_strategy_window2()
 # cegt.ws.save_to_csv("faster_actions.csv")
 # cegt.ws.save_to_csv("faster_means.csv")
 cegt.print_statistics()
@@ -43,7 +44,7 @@ cegt.print_statistics()
 
 cegt.plot_chart_and_sequtity()
 # cegt.ws.debug_data = []
-cegt.check_strategy_window(normalization=False)
+# cegt.check_strategy_window()
 # ef_window = cegt.trade_data['step_eq_fee']
 # eqf = cegt.trade_data['equity_fee']
 # print(eqf)
@@ -53,8 +54,8 @@ cegt.check_strategy_window(normalization=False)
 # result_row = cegt.get_statistics()
 # print(result_row)
 
-cegt.print_statistics()
-cegt.plot_chart_and_sequtity()
+# cegt.print_statistics()
+# cegt.plot_chart_and_sequtity()
 # cegt.process_old_type_result()
 # full_name_img = os.path.join(images_folder, f"{name_file}.png")
 # name_bot = 'Vasya'

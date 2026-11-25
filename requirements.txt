@@ -1,23 +1,27 @@
-pandas
-numpy
-matplotlib
-apimoex
-opencv-python
-optuna
-PyDirectInput
-pyautogui
-keyboard
-openpyxl
-xlsxwriter
-pyarrow
-fastparquet
-tqdm
-psutil
-python-dotenv
-scipy
-torch
-pytz
-plotly
-PyQt5
-scikit-learn
+# Ядро обработки данных
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.0
 
+# Паркет и Excel (косвенные зависимости pandas: read_parquet / read_excel, ExcelWriter)
+pyarrow==16.1.0
+openpyxl==3.1.5
+xlsxwriter==3.2.2
+
+# Визуализация
+matplotlib==3.9.0
+
+# HTTP / данные MOEX
+requests==2.32.2
+apimoex==1.4.0
+
+# Оптимизация и ML
+optuna==4.4.0
+scikit-learn==1.5.0
+
+# Утилиты
+tqdm==4.66.4
+psutil==6.0.0
+
+# GUI боевого лаунчера (startCS.py)
+PyQt5==5.15.10

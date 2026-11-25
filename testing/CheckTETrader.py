@@ -478,7 +478,7 @@ class CheckTETrader:
             self.update_step_data(price)
 
     @duration_time
-    def check_strategy_window(self, normalization=True):
+    def check_strategy_window_old(self, normalization=False):
         """
         Честный оконный тест для проверки стратегии.
         """
@@ -569,6 +569,110 @@ class CheckTETrader:
                             delta = auto_take
                         else:
                             delta = (open_price - price) // self.price_step
+                    else:
+                        delta = (open_price - price) // self.price_step
+
+            action = self.ws(pdata, pos, delta)
+            self.work_action(action, price, row_name, high, low, top_level, bottom_level)
+            self.update_step_data(price)
+
+    @duration_time
+    def check_strategy_window(self, normalization=False):
+        """
+        Ускоренный оконный тест для проверки стратегии.
+        """
+        self.reload_data()
+        n = len(self.df)
+
+        # 1. Предрасчет массивов до цикла (убирает тысячи медленных .iloc[-1])
+        closes = self.df['close'].values
+        highs = self.df['high'].values
+        lows = self.df['low'].values
+        row_names = self.df['x'].values
+
+        if self.close_on_time:
+            close_hours = self.df['weekday'].map(lambda wd: self.close_map[wd][0])
+            close_minutes = self.df['weekday'].map(lambda wd: self.close_map[wd][1])
+            mask_values = ((self.df['hour'] > close_hours) | (
+                (self.df['hour'] == close_hours) & (self.df['minute'] >= close_minutes)
+            )).values
+        else:
+            mask_values = None
+
+
+        price_cols = ['open', 'high', 'low', 'close', 'middle']
+
+        for i in self.get_iterator(range(n)):
+            price = float(closes[i])
+            if i < self.window:
+                self.update_step_data(price)
+                continue
+
+            row_name = row_names[i]
+            high = float(highs[i])
+            low = float(lows[i])
+
+            # 2. Проверяем время закрытия ДО копирования и срезки окна
+            if self.close_on_time and mask_values[i]:
+                self.work_action('close_all', price, row_name, high, low, None, None)
+                self.update_step_data(price)
+                continue
+
+            df_slice = self.df.iloc[i - self.window : i + 1].copy()
+
+            # 3. Векторная нормализация
+            if normalization:
+                candle_max = float(highs[i - self.window : i + 1].max())
+                if candle_max > 0:
+                    vol_max = float(df_slice['volume'].values.max())
+                    df_slice['volume'] = df_slice['volume'].values / vol_max if vol_max > 0 else 0.0
+                    df_slice[price_cols] = df_slice[price_cols].values / candle_max
+
+            tdata = {'chart': df_slice}
+            pdata = self.ws.preprocessing(tdata)
+            df_pdata = pdata.get('chart')
+
+            top_level, bottom_level = None, None
+            levels_list = pdata.get('levels') if isinstance(pdata, dict) else None
+            if levels_list and len(levels_list) >= 2:
+                top_level, bottom_level = levels_list[0], levels_list[1]
+            elif df_pdata is not None:
+                if 'test_top_level' in df_pdata.columns:
+                    top_level = df_pdata['test_top_level'].iat[-1]
+                if 'test_bottom_level' in df_pdata.columns:
+                    bottom_level = df_pdata['test_bottom_level'].iat[-1]
+
+            if normalization and df_pdata is not None:
+                norm_price = float(df_pdata['close'].iat[-1])
+                if norm_price != 0:
+                    if top_level is not None:
+                        top_level = price * top_level / norm_price
+                    if bottom_level is not None:
+                        bottom_level = price * bottom_level / norm_price
+
+            pos = self.trade_data['pos']
+            open_price = self.trade_data['open_price']
+
+            delta = None
+            if pos != 0 and open_price != 0:
+                if pos > 0:
+                    delta_nega = (low - open_price) // self.price_step
+                    if self.ws.stop is not None and delta_nega <= -self.ws.stop:
+                        delta = delta_nega
+                    elif self.auto_take is not None and self.ws.take is not None:
+                        delta_posi = (high - open_price) // self.price_step
+                        auto_take = self.ws.take * self.auto_take
+                        delta = auto_take if delta_posi >= auto_take else (price - open_price) // self.price_step
+                    else:
+                        delta = (price - open_price) // self.price_step
+                else:
+                    delta_nega = (open_price - high) // self.price_step
+                    if self.ws.stop is not None and delta_nega <= -self.ws.stop:
+                        delta = delta_nega
+                    elif self.auto_take is not None and self.ws.take is not None:
+                        delta_posi = (open_price - low) // self.price_step
+                        auto_take = self.ws.take * self.auto_take
+                        delta = auto_take if delta_posi >= auto_take else (open_price - price) // self.price_step
                     else:
                         delta = (open_price - price) // self.price_step
 

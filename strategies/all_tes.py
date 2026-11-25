@@ -2,12 +2,17 @@ from strategies.PTEs.PTE1_9 import *
 from strategies.PTEs.PTE10_19 import *
 from strategies.PTEs.PTE20_29 import *
 from strategies.PTEs.PTE30_39 import *
+from strategies.PTEs.PTE40_ai import *
 from strategies.LTEs.LTE1 import *
 from strategies.LTEs.LTE2 import *
 from strategies.LTEs.LTE3 import *
+from strategies.LTEs.LTE4_ai import *
 from strategies.WTEs.WTE1_9 import *
 from strategies.WTEs.WTE10_19 import *
+from strategies.WTEs.WTE11_ai import *
 from strategies.UTEs.UTE1_9 import *
+from strategies.UTEs.UTE10_ai import *
 from strategies.STEs.STE_CA1_9 import *
 from strategies.STEs.STE_ML10_19 import *
 from strategies.VTEs.VTE1 import *
+from strategies.VTEs.VTE2_ai import *
