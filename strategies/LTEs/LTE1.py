@@ -6,7 +6,7 @@ from for_strategies.vsa_indicators import add_dvsai,add_cdvsai
 from for_strategies.fix_params import fix_supertrend_params,fix_two_periods_hm
 
 
-#     'ALRS2':(LTE1_CC2,(None,8,5,19,55,5,0.6,0,0,3,0.24),1,None), кроет в хаях
+#'ALRS2':(LTE1_CC2,(None,8,5,19,55,5,0.6,0,0,3,0.24),1,None), кроет в хаях
 class LTE1_CC2(BaseTE):
     """stop=None, take=None, period=15, period_q=10, max_period=55, solution=8,mult=2,use_stop=1,use_ps=1,period2s = 3, quantile=0.3 \n
     Crisis Counter 13 features"""
@@ -71,42 +71,6 @@ class LTE1_CC2(BaseTE):
         
         if self.use_stop:
             return 'close_all'
-        
-        return None
-
-# Healthy
-class LTE1_OKROSHKA(BaseTE):
-    """stop=None, take=None, period=15, period_chop=10"""
-    def __init__(self, symbol='Test', price_step=None, mode=None, stop=None, take=None, period=15, period_chop=10):
-        super().__init__(symbol, price_step, mode, stop, take)
-        self.needs_info = {'chart': self.symbol}
-        self.period = period
-        self.period_chop = period_chop
-
-    def preprocessing(self, tdata):
-        pdata = {}
-        df = tdata['chart']
-        df = add_rsi(df, self.period)
-        df = add_chop(df, self.period_chop)
-        df = self.add_slice_df(df)
-        pdata['chart'] = df
-        return pdata
-    
-    def _get_action_from_row(self, row):
-        threshold = 30
-        if 60 > row['chop'] > 45:
-            threshold = 30
-        elif row['chop'] > 60:
-            threshold = 25
-        elif 45 > row['chop'] > 30:
-            threshold = 20
-        else:
-            threshold = 10
-        
-        if row['rsi'] < threshold:
-            return 'open_long'
-        if row['rsi'] > 100 - threshold:
-            return 'open_short'
         
         return None
     

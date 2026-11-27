@@ -1,9 +1,9 @@
-from strategies.all_egs import *
+from strategies.all_tes import *
 
 from optimization.optuna_grops.opt_params import *
 group = (    
     (
-        PEG30_ETC, 
+        PTE30_ETC, 
         [   
             (0,1),
             (2,200,1),
@@ -18,7 +18,7 @@ group = (
         ]
     ),
     (
-        PEG30_ETC2, 
+        PTE30_ETC2, 
         [   
             (0,1),
             (2,200,1),

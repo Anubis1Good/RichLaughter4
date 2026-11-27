@@ -2,61 +2,6 @@
 from strategies.BaseTE import BaseTE
 from for_strategies.classic_indicators import add_adx,add_chop
 from for_strategies.help_dtypes.actions_cls import OrderCords
-    
-class PTE30_MURKY(BaseTE):
-    """stop=None, take=None, work_trend=1,min_spred=3,use_long=1,use_short=1,period_adx=14,period_chop=14,period_sma_l=30,period_sma_s=15,thr_adx=25,thr_chop=40"""
-    def __init__(self, symbol='Test', price_step=None, mode=None, stop=None, take=None, work_trend=1,min_spred=3,use_long=1,use_short=1,period_adx=14,period_chop=14,period_sma_l=30,period_sma_s=15,thr_adx=30,thr_chop=40):
-        super().__init__(symbol, price_step, mode, stop, take)
-        self.needs_info = {'chart':self.symbol,'spred':self.symbol}
-        self.period_adx = period_adx
-        self.period_chop = period_chop
-        self.period_sma_l = period_sma_l
-        self.period_sma_s = period_sma_s
-        self.thr_adx = thr_adx
-        self.thr_chop = thr_chop
-        self.work_trend = work_trend
-        self.min_spred = min_spred
-        self.use_long = use_long
-        self.use_short = use_short
-        self.type_te = 2
-    
-    def preprocessing(self, tdata):
-        pdata = {}
-        df = tdata['chart']
-        df = add_adx(df,self.period_adx)
-        df = add_chop(df,self.period_chop)
-        df['sma_s'] = df['close'].rolling(self.period_sma_s).mean()
-        df['sma_l'] = df['close'].rolling(self.period_sma_l).mean()
-        df = self.add_slice_df(df)
-        pdata['chart'] = df
-        pdata['can_spred'] = tdata['spred'] > self.min_spred
-        return pdata
-    
-    def get_raw_action(self,pdata):
-        row = self.get_test_row(pdata['chart'])
-        # print(self.symbol,pdata['can_spred'])
-        if pdata['can_spred']:
-            if row['adx'] < self.thr_adx and row['chop'] > self.thr_chop:
-                # print('range')
-                if not self.use_long:
-                    return 'open_short'
-                if not self.use_short:
-                    return 'open_long'
-                return 'open_all'
-            # trend
-            else:
-                if self.work_trend:
-                    # long
-                    if row['sma_s'] > row['sma_l'] and self.use_long:
-                        # print('long')
-                        return 'open_long'
-                    # short
-                    else:
-                        # print('short')
-                        if self.use_short:
-                            return 'open_short'
-                else:
-                    return 'close_all'
 
 #Нет закрытия кроме тейка! Изменить надо! 
 # 14.10.2026 возможно стоит оставить только ETC2

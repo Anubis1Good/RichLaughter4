@@ -681,7 +681,7 @@ class CheckTETrader:
             self.update_step_data(price)
 
     # POST_PROCESS_RESULT_FUNCS
-    def process_old_type_result(self):
+    def process_old_type_result_old(self):
         df_eq = pd.DataFrame({'eq': self.trade_data['equity'], 'eq_fee': self.trade_data['equity_fee']})
         trades = {
             'total': self.trade_data['total'],
@@ -761,6 +761,49 @@ class CheckTETrader:
         trades['curve_composite'] = composite_score(em['total_return'], em)
         trades['curve_lex'] = lex_score(em, tr_eps=0.01, dd_limit=1.0)
         return trades, equity, equity_fee, longs, shorts, closes
+
+    def process_old_type_result(self):
+        df_eq = pd.DataFrame({'eq': self.trade_data['equity'], 'eq_fee': self.trade_data['equity_fee']})
+        win_rate = 0.0
+        if not df_eq.empty and len(df_eq) >= 2:
+            diff_eq = df_eq['eq'].diff().dropna()
+            if len(diff_eq) > 0:
+                wins = len(diff_eq[diff_eq > 0])
+                loss = len(diff_eq[diff_eq < 0])
+                win_rate = round((wins / (wins + loss)) * 100, 2) if (wins + loss) > 0 else 0.0
+
+        # Максимальная просадка по незакрытой эквити с комиссией
+        pick_profit = 0.0
+        max_dropdown = 0.0
+        for p in self.trade_data['unclosed_fee']:
+            if p > pick_profit:
+                pick_profit = p
+            elif p < pick_profit:
+                dd = pick_profit - p
+                if dd > max_dropdown:
+                    max_dropdown = dd
+
+        trades = {
+            'total': round(self.trade_data['total'], 4),
+            'total_abs_fee': round(self.trade_data['equity_fee'][-1], 4) if self.trade_data['equity_fee'] else 0.0,
+            'total_fee_per': round(self.trade_data['total_wfees_per'], 2),
+            'count': self.trade_data['count'],
+            'win_rate_wf': win_rate,
+            'total_fee': round(self.trade_data['fees'], 4),
+            'max_dropdown': round(max_dropdown, 4),
+        }
+
+        longs = np.array(self.trade_data['o_longs']) if self.trade_data['o_longs'] else np.array([])
+        shorts = np.array(self.trade_data['o_shorts']) if self.trade_data['o_shorts'] else np.array([])
+        closes = (
+            np.array(self.trade_data['c_longs'] + self.trade_data['c_shorts'])
+            if (self.trade_data['c_longs'] or self.trade_data['c_shorts'])
+            else np.array([])
+        )
+        equity = np.array(self.trade_data['equity'])
+        equity_fee = np.array(self.trade_data['equity_fee'])
+        return trades, equity, equity_fee, longs, shorts, closes
+
 
     def print_statistics(self):
         """Печать статистики по торгам."""
@@ -894,8 +937,15 @@ class CheckTETrader:
                         plt.axvline(x=idx, color='red', linestyle='--', alpha=0.3, linewidth=0.8)
                         y_min, y_max = plt.ylim()
                         plt.text(
-                            idx, y_max * 0.95, f'{close_hour:02d}:{close_minute:02d}',
-                            rotation=90, fontsize=7, color='red', alpha=0.5
+                            idx,
+                            y_min + (y_max - y_min) * 0.03,
+                            f'{close_hour:02d}:{close_minute:02d}',
+                            rotation=90,
+                            va='bottom',
+                            ha='right',
+                            fontsize=7,
+                            color='red',
+                            alpha=0.5,
                         )
                         break
 
@@ -904,7 +954,7 @@ class CheckTETrader:
 
     def plot_chart_and_sequtity(self, convert_tf=None, help_info='complex', show=True):
         """Создаем фигуру с двумя subplot'ами."""
-        fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+        fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(12, 7))
 
         plt.sca(ax1)
         self.plot_chart(convert_tf, show=False)

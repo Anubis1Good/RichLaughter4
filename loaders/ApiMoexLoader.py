@@ -1,9 +1,13 @@
 import os
 from time import time
+import functools
+import urllib3
 import requests
 import apimoex
 import pandas as pd
 import numpy as np
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class ApiMoexLoader:
     def __init__(self,symbol,board: str = "TQBR",market:str="shares", engine:str = "stock"):
@@ -23,10 +27,13 @@ class ApiMoexLoader:
             4 - 1 квартал
         """
         with requests.Session() as session:
+            session.verify = False
+            session.request = functools.partial(session.request, verify=False)
             data = apimoex.get_board_candles(session, self.symbol,timeframe,start,end,board=self.board,market=self.market,engine=self.engine)
             df = pd.DataFrame(data)
 
         return df
+
 
     def processing_df(self, df: pd.DataFrame):
         df = df.copy()
@@ -77,4 +84,3 @@ class ApiMoexLoader:
             path +='.csv'
             df.to_csv(path)
         print('Датафрейм сохранен в', path)
-

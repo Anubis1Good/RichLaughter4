@@ -131,50 +131,6 @@ class LTE2_DRINKER(BaseTE):
         
         return None
 
-class LTE2_ALKASH(BaseTE):
-    """stop=None, take=None, period=100, multiplier=2, period2=10, use_stop=1"""
-    def __init__(self, symbol='Test', price_step=None, mode=None, stop=None, take=None, period=55, multiplier=2, period2=10, use_stop=1):
-        super().__init__(symbol, price_step, mode, stop, take)
-        self.needs_info = {'chart': self.symbol}
-        self.period = period
-        self.period2 = period2
-        self.multiplier = multiplier
-        self.use_stop = use_stop
-
-    def preprocessing(self, tdata):
-        pdata = {}
-        df = tdata['chart']
-        df = add_bollinger(df, self.period, multiplier=self.multiplier)
-        df = add_vodka_channel(df, self.period2)
-        df = self.add_slice_df(df)
-        pdata['chart'] = df
-        return pdata
-    
-    def _get_action_from_row(self, row):
-        can_long = row['close'] > row['bbd']
-        can_short = row['close'] < row['bbu']
-        nearest_long = row['high'] - row['close'] > row['close'] - row['low']
-        
-        if row['low'] <= row['bottom_mean'] and nearest_long:
-            if can_long:
-                return 'open_long'
-            else:
-                return 'close_short'
-        
-        if row['high'] >= row['top_mean'] and not nearest_long:
-            if can_short:
-                return 'open_short'
-            else:
-                return 'close_long'
-        
-        if self.use_stop:
-            if not can_short:
-                return 'close_short'
-            if not can_long:
-                return 'close_long'
-        
-        return None
-
 # 14.10.2026 надо подумать над тем, что бы избегать контрендовых сделок
 class LTE2_FENNEC(BaseTE):
     """stop=None, take=None, period=100, multiplier=2, period2=10, threshold_enter=40, threshold_exit=20, divider=1, use_stop=1"""
@@ -271,50 +227,6 @@ class LTE2_LYNX(BaseTE):
         
         return None
 
-class LTE2_MONSTER(BaseTE):
-    """stop=None, take=None, period=20, threshold=30, period2=10, shift=2, period_adx=30,max_period=55"""
-    def __init__(self, symbol='Test', price_step=None, mode=None, stop=None, take=None, period=20, threshold=30, period2=10, shift=2, period_adx=30,max_period=55):
-        super().__init__(symbol, price_step, mode, stop, take)
-        self.needs_info = {'chart': self.symbol}
-        max_total = (max_period // 3) * 2
-        total = period + period_adx
-
-        if total > max_total:
-            ratio = max_total / total
-            self.period = int(period * ratio)
-            self.period_adx = int(period_adx * ratio)
-        else:
-            self.period = period
-            self.period_adx = period_adx
-        self.threshold = threshold
-        self.period2 = period2
-        self.shift = shift
-        self.type_te = 1
-
-    def preprocessing(self, tdata):
-        pdata = {}
-        df = tdata['chart']
-        df = add_adx(df, self.period_adx)
-        df['sma_adx'] = df['adx'].rolling(self.period).mean()
-        df = add_donchan_channel(df, self.period2)
-        df['stop_long'] = df['low'].shift(self.shift)
-        df['stop_short'] = df['high'].shift(self.shift)
-        df = self.add_slice_df(df)
-        pdata['chart'] = df
-        return pdata
-    
-    def _get_action_from_row(self, row):
-        if self.threshold < row['adx'] > row['sma_adx']:
-            if row['high'] == row['max_hb']:
-                return 'open_long'
-            if row['low'] == row['min_hb']:
-                return 'open_short'
-            if row['close'] < row['stop_long']:
-                return 'close_long'
-            if row['close'] > row['stop_short']:
-                return 'close_short'
-        
-        return 'close_all'
 
 class LTE2_DRG(BaseTE):
     """stop=None, take=None, period=100, multiplier=2, period2=10, threshold_enter=40, threshold_exit=20,  use_stop=1"""

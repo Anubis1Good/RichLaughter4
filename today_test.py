@@ -1,72 +1,92 @@
 import os
+import re
+import traceback
 import pandas as pd
 import matplotlib.pyplot as plt
+from datetime import date, timedelta
+
 from loaders.ApiMoexLoader import ApiMoexLoader
-from datetime import date,timedelta
 from utils.work_dfs.convert_tf import convert_timeframe
-from traders.VT.bot_on_ticker import bot_on_ticker
-from testing.CheckEGTrader import CheckEGTrader
+from traders.cscalp_sdk_trader.bot_on_ticker import bot_on_ticker
+from testing.CheckTETrader import CheckTETrader
 from testing.test_constants import *
+from strategies.BaseTE import BaseTE
 
-today = date.today()
-start_date = str(today - timedelta(days=1))
-# tickers = ['ALRS','ALRS2','MAGN','MAGN2','IRAO','IRAO2','MTLR','MTLR2','RUAL','RUAL2','VTBR','VTBR2','ASTR','ASTR2','ROSN','ROSN2','SBER','SBER2','SIBN','SIBN2','SNGSP','SNGSP2','T','T2','AFLT','AFLT2','HYDR','HYDR2','OGKB','OGKB2','RTKM','RTKM2','TGKA','TGKA2','VKCO','VKCO2']
-tickers = bot_on_ticker.keys()
-folder_date = str(today).replace('-','_')
-main_folder: str = os.path.join('_test_results/today',folder_date)
-os.makedirs(main_folder,exist_ok=True)
 
-for ticker in tickers:
-    # loader = ApiMoexLoader(ticker,'RFUD','forts','futures')
-    try:
-        if '2' in ticker:
-            load_ticker = ticker[:-1]
-        else:
-            load_ticker = ticker
-        loader = ApiMoexLoader(load_ticker)
-        df = loader.load_data(start_date)
-        df = loader.processing_df(df)
-        df = convert_timeframe(df,'5min')
-        # print(df.head())
-        df['ms'] = pd.to_datetime(df['ms'])
+def flatten_bot_configs(cfg: dict) -> list:
+    """Разворачивает словарь bot_on_ticker (вложенный по слотам или плоский) в список (slot, key, ws)."""
+    items = []
+    for k, v in cfg.items():
+        if isinstance(v, dict):
+            for ticker_key, ws_tuple in v.items():
+                items.append((str(k), str(ticker_key), ws_tuple))
+        elif isinstance(v, (tuple, list)):
+            items.append(('default', str(k), v))
+    return items
 
-        # # 2. Сортируем по времени (на всякий случай)
-        df = df.sort_values('ms').reset_index(drop=True)
 
-        # 3. Находим последний день в данных
-        last_day = df['ms'].dt.date.max()
+if __name__ == '__main__':
+    today = date.today()
+    start_date = str(today - timedelta(days=3))  # Берём 3 дня с запасом на выходные/праздники для прогрева 80 баров
 
-        # 4. Отбираем все строки последнего дня
-        df_last_day = df[df['ms'].dt.date == last_day]
+    folder_date = str(today).replace('-', '_')
+    main_folder = os.path.join('_test_results/today', folder_date)
+    os.makedirs(main_folder, exist_ok=True)
 
-        # 5. Отбираем строки всех дней, кроме последнего
-        df_previous = df[df['ms'].dt.date < last_day]
+    df_cache = {}
+    configs = flatten_bot_configs(bot_on_ticker)
 
-        # 6. Из предыдущих дней берем последние 80 строк (баров)
-        df_previous_last_80 = df_previous.tail(80)
+    for slot_name, ticker_key, ws_tuple in configs:
+        try:
+            strategy_class = ws_tuple[0]
+            if strategy_class is BaseTE or 'PAIRTEs' in getattr(strategy_class, '__module__', ''):
+                continue
 
-        # 7. Объединяем
-        df = pd.concat([df_previous_last_80, df_last_day], ignore_index=True)
-        df = df.reset_index(drop=True)
-        # print(df.head())
-        cwd = CheckEGTrader(
-            df,
-            bot_on_ticker[ticker],
-            MAIN_FEE,
-            ticker,
-            use_tqdm=True,
-            window=80,
-            days_mode=DAYS_MODE,
-            slip_stop_delta=SLIP_STOP_DELTA)
-        
-        cwd.check_strategy_window()
-        cwd.plot_chart_and_sequtity(show=False)
-        img_name = ticker
-        full_name_img = os.path.join(main_folder, f"{ticker}.png")
-        plt.title(f"{img_name}")
-        # plt.legend()
-        plt.savefig(full_name_img, bbox_inches='tight')
-        plt.close()
-    except:
-        print(ticker,'не вышло')
+            # Убираем цифры в конце ключа (ALRS2 -> ALRS)
+            load_ticker = re.sub(r'\d+$', '', ticker_key)
 
+            if load_ticker not in df_cache:
+                loader = ApiMoexLoader(load_ticker)
+                raw_df = loader.load_data(start_date)
+                proc_df = loader.processing_df(raw_df)
+                proc_df = convert_timeframe(proc_df, '5min')
+                proc_df['ms'] = pd.to_datetime(proc_df['ms'])
+                proc_df = proc_df.sort_values('ms').reset_index(drop=True)
+
+                last_day = proc_df['ms'].dt.date.max()
+                df_last_day = proc_df[proc_df['ms'].dt.date == last_day]
+                df_previous_last_80 = proc_df[proc_df['ms'].dt.date < last_day].tail(80)
+
+                df_final = pd.concat([df_previous_last_80, df_last_day], ignore_index=True).reset_index(drop=True)
+                df_final['x'] = df_final.index
+                df_cache[load_ticker] = df_final
+
+
+            df = df_cache[load_ticker].copy()
+
+            cwd = CheckTETrader(
+                df=df,
+                ws=ws_tuple,
+                fee=MAIN_FEE,
+                symbol=load_ticker,
+                use_tqdm=True,
+                window=80,
+                days_mode=DAYS_MODE,
+                slip_stop_delta=SLIP_STOP_DELTA,
+            )
+
+            cwd.check_strategy_window(normalization=False)
+            cwd.plot_chart_and_sequtity(show=False)
+
+            safe_slot = re.sub(r'[^\w\-]', '_', slot_name)
+            img_prefix = f"{safe_slot}_{ticker_key}" if slot_name != 'default' else ticker_key
+            full_name_img = os.path.join(main_folder, f"{img_prefix}.png")
+
+            plt.title(f"{img_prefix} ({strategy_class.__name__})")
+            plt.savefig(full_name_img, bbox_inches='tight', dpi=200)
+            plt.close()
+            print(f"[OK] {img_prefix} -> {full_name_img}")
+
+        except Exception as e:
+            print(f"[FAIL] {slot_name} | {ticker_key} не вышло: {e}")
+            traceback.print_exc()
